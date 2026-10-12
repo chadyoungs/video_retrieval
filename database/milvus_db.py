@@ -2,8 +2,6 @@ import sys
 from pathlib import Path
 import re
 
-sys.path.append(str(Path(__file__).parent.parent))
-
 from pymilvus import DataType, MilvusClient
 
 from utils.config import ALIAS, COLLECTION_NAME, EMBEDDING_DIM, MILVUS_HOST, MILVUS_PORT
