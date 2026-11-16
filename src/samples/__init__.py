@@ -1,0 +1,1 @@
+"""Sample frame extraction module"""
