@@ -5,7 +5,9 @@ from typing import Literal
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
-
+    
+    # ======== Device =========
+    device: str = "cuda"  # or "cpu"
     
     # ========= Milvus =========
     milvus_host: str = "localhost"
@@ -83,8 +85,8 @@ class Settings(BaseSettings):
     hf_endpoint: str = "https://hf-mirror.com"
     
     # ========= Frame / Embedding Policy =========
-    frame_policy: Literal["whole_clip", "keyframes"] = "whole_clip"
-    keyframe_count: int = 4  # valid while frame_policy="keyframes"
+    encoder_type: Literal["whole_clip", "keyframes"] = "keyframes"
+    keyframe_count: int = 5  # valid while encoder_type="keyframes"
    
     # ========= Clip slicing =========
     clip_duration_sec: float = 10.0

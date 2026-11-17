@@ -2,22 +2,26 @@ from __future__ import annotations
 from typing import Literal
 
 from src.config.settings import settings
-from src.encoders.base import BaseEncoder
-from src.encoders.keyframe_encoder import KeyFrameEncoder
-from src.encoders.timeseries_encoder import CLIP4ClipVideoEncoder
+from src.encoders.base import VideoEncoderBase
+from src.encoders.keyframe_encoder import KeyframeEncoder
+from src.encoders.text_encoder import TextEncoder
+from encoders.wholeclip_encoder import CLIP4ClipVideoEncoder
 
-EncoderType = Literal["keyframe", "clip4clip"]
+EncoderType = Literal["keyframes", "wholeclip"]
 
 
-def get_encoder(encoder_type: EncoderType) -> BaseEncoder:
+def get_encoder(encoder_type: EncoderType) -> VideoEncoderBase:
     if encoder_type == "keyframe":
-        return KeyFrameEncoder()
-    elif encoder_type == "clip4clip":
+        return KeyframeEncoder()
+    elif encoder_type == "wholeclip":
         return CLIP4ClipVideoEncoder()
     else:
         raise ValueError(f"Unsupported encoder_type {encoder_type}")
 
+def get_text_encoder() -> TextEncoder:
+    """Get standalone text encoder for text query retrieval"""
+    return TextEncoder()
 
-def get_default_encoder() -> BaseEncoder:
-    """Read from settings.encoder_impl: keyframe / clip4clip"""
-    return get_encoder(settings.encoder_impl)
+def get_default_encoder() -> VideoEncoderBase:
+    """Read from settings.encoder_type: keyframes / wholeclip"""
+    return get_encoder(settings.encoder_type)

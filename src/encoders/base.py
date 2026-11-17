@@ -1,19 +1,39 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Union
+
 import numpy as np
 from PIL import Image
 
 
-class BaseEncoder(ABC):
-    """Unified encoder interface"""
-    @abstractmethod
-    def encode(self, input_data, normalize: bool = True) -> np.ndarray:
-        raise NotImplementedError
+class VideoEncoderBase(ABC):
+    """
+    Unified encoder base class.
+    Only one abstract entrypoint: encode().
+    Different encoder implementations define their own inner logic.
+    """
+    @property
+    def dim(self) -> int:
+        raise NotImplementedError("Subclass must implement dim property")
 
-
-class BaseAnnotator(ABC):
     @abstractmethod
-    def annotate(self, image: Image.Image) -> dict:
-        """Return structured annotation dict matching video segment metadata schema"""
-        raise NotImplementedError
+    def encode(
+        self,
+        video_path: Optional[Union[str, Path]] = None,
+        start_sec: Optional[float] = None,
+        end_sec: Optional[float] = None,
+        preloaded_frames: Optional[List[Image.Image]] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Encode a video segment into embedding.
+        Args:
+            video_path: path to video file
+            start_sec: segment start time in seconds
+            end_sec: segment end time in seconds
+            preloaded_frames: already decoded PIL RGB frames, skip video reading if provided
+        Returns:
+            normalized embedding array, None if failed / no valid frames
+        """
+        ...
+

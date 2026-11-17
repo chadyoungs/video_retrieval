@@ -39,6 +39,6 @@ def get_vector_store(
     """Return the vector store; collection is mapped per dataset source."""
     key = dataset_key or settings.dataset_source
     collection = settings.milvus_collections.get(
-        key, settings.milvus_collection
+        key, settings.milvus_collections
     )
     return MilvusVectorStore(collection_name=collection)

@@ -10,9 +10,10 @@ import torch
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
-from src.annotators.factory import get_annotator
+from src.annotators.factory import get_default_annotator
 from src.db.store_factory import get_relational_store, get_vector_store
-from encoders.factory import get_encoder
+from src.encoders.factory import get_default_encoder
+from src.encoders.video_loader import read_video_frames_raw
 from src.ingestion.segmenter import segment_bounds
 from src.utils.dataset_adapter import load_video_entries
 from src.config.settings import settings
@@ -44,8 +45,8 @@ class IngestionPipeline:
         self.rel_store.init()
         self.vec_store.init()
 
-        self.encoder = get_encoder()
-        self.annotator = get_annotator()
+        self.encoder = get_default_encoder()
+        self.annotator = get_default_annotator()
 
         self.stats = {
             "total_videos": 0,
@@ -56,37 +57,37 @@ class IngestionPipeline:
             "inserted_segments": 0,
         }
 
-    def _flush_batch(self, sqlite_batch: list[dict[str, Any]], milvus_batch: list[dict[str, Any]]):
-        if not sqlite_batch and not milvus_batch:
+    def _flush_batch(self, sql_batch: list[dict[str, Any]], milvus_batch: list[dict[str, Any]]):
+        if not sql_batch and not milvus_batch:
             return
         try:
-            if sqlite_batch:
-                self.rel_store.batch_insert(sqlite_batch)
+            if sql_batch:
+                self.rel_store.batch_insert(sql_batch)
             if milvus_batch:
                 self.vec_store.batch_insert(milvus_batch)
-            logger.debug("Flushed %d sqlite rows, %d milvus rows", len(sqlite_batch), len(milvus_batch))
+            logger.debug("Flushed %d sql rows, %d milvus rows", len(sql_batch), len(milvus_batch))
         except Exception as e:
             logger.exception("Batch insert failed, discard this batch")
-            self.stats["skipped_segments"] += len(sqlite_batch)
+            self.stats["skipped_segments"] += len(sql_batch)
 
     def _process_single_video(self, video_entry: dict[str, Any]) -> tuple[list[dict], list[dict]]:
         """
         Process one video: split to segments, read frames once, annotate + embed,
-        return sqlite_batch, milvus_batch.
+        return sql_batch, milvus_batch.
         """
         video_file = video_entry["video_file"]
         base_metadata = video_entry.get("metadata", {})
-        sqlite_batch: list[dict] = []
+        sql_batch: list[dict] = []
         milvus_batch: list[dict] = []
 
         try:
-            seg_starts, seg_ends = segment_bounds(video_file, settings.clip_duration)
+            seg_starts, seg_ends = segment_bounds(video_file, settings.clip_duration_sec)
             if not seg_starts:
                 return [], []
 
             segments_raw_frames = []
             for s, e in zip(seg_starts, seg_ends):
-                frames = self.encoder.read_video_frames_raw(
+                frames = read_video_frames_raw(
                     video_path=video_file,
                     start=s,
                     end=e,
@@ -115,7 +116,7 @@ class IngestionPipeline:
                 if not frames:
                     embed_results.append(None)
                     continue
-                emb = self.encoder.generate_video_embedding(
+                emb = self.encoder.encode(
                     video_file=video_file,
                     start=s,
                     end=e,
@@ -144,7 +145,7 @@ class IngestionPipeline:
                     "clip_file_path": video_file_path,
                 }
 
-                sqlite_row = {
+                sql_row = {
                     "video_file_name": video_file_name,
                     "video_file_path": video_file_path,
                     "segment_start": s,
@@ -164,7 +165,7 @@ class IngestionPipeline:
                     "embedding_model": settings.embedding_model_version,
                     "clip_vector": emb,
                 }
-                sqlite_batch.append(sqlite_row)
+                sql_batch.append(sql_row)
                 milvus_batch.append(milvus_row)
                 self.stats["inserted_segments"] += 1
 
@@ -173,7 +174,7 @@ class IngestionPipeline:
             self.stats["failed_videos"] += 1
             return [], []
 
-        return sqlite_batch, milvus_batch
+        return sql_batch, milvus_batch
 
     def run(self):
         video_entries = load_video_entries()

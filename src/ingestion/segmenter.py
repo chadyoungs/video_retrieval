@@ -29,7 +29,9 @@ def segment_bounds(
 
     segment_starts = np.arange(0.0, video_duration, clip_duration)
     segment_ends = segment_starts + clip_duration
-
+    
+    # make sure the last segment ends at the video duration
     segment_starts[-1] = max(0.0, video_duration - clip_duration)
     segment_ends[-1] = video_duration
+    
     return segment_starts.tolist(), segment_ends.tolist()

@@ -26,7 +26,6 @@ class CLIP4ClipVideoEncoder(BaseEncoder):
         self.cache_root = Path(settings.model_cache_dir) / "clip4clip"
         self.load_path = str(self.cache_root)
 
-        # 如果你后续替换成官方CLIP4CLIP模型类，在这里替换
         self.processor = AutoProcessor.from_pretrained(self.load_path)
         self.model = self._build_clip4clip_model()
         self.model.to(self.device)
