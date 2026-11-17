@@ -1,29 +1,33 @@
-"""Abstract interface for the vector store.
-No SQL / relational knowledge here.
-"""
+"""Vector store interface shared by every dataset."""
+
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 
 class VectorStoreBase(ABC):
     @abstractmethod
-    def create_collection(self, drop_existing: bool = False) -> None:
-        """Create milvus collection and index for this dataset."""
+    def init(self) -> None:
+        """Create this dataset's own collection if missing."""
 
     @abstractmethod
-    def insert_vectors(self, records: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Insert records with embedding vector."""
+    def drop(self) -> None:
+        """Drop this dataset's own collection."""
+
+    @abstractmethod
+    def batch_insert(self, rows: List[Dict[str, Any]]) -> int:
+        """Insert a batch; return number of written rows."""
 
     @abstractmethod
     def search_vectors(
         self,
-        query_embedding: List[float],
-        limit: int = 5,
+        query_vector: List[float],
+        top_k: int = 10,
         metadata_filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Vector similarity search, return hits with normalized score [0,1]."""
+        """ANN search on this dataset's own collection."""
 
     @abstractmethod
     def close(self) -> None:
-        """Close milvus client."""
+        """Disconnect from Milvus."""

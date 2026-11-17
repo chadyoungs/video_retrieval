@@ -1,19 +1,23 @@
-"""Abstract interface for the relational metadata store.
-No Milvus / vector knowledge here.
-"""
+"""Relational store interface shared by every dataset."""
+
 from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 
 class RelationalStoreBase(ABC):
     @abstractmethod
-    def init_schema(self, drop_existing: bool = False) -> None:
-        """Create tables and indexes for this dataset."""
+    def init(self) -> None:
+        """Create this dataset's own table if missing."""
 
     @abstractmethod
-    def insert_records(self, records: List[Dict[str, Any]]) -> int:
-        """Batch insert metadata records, return inserted row count."""
+    def drop(self) -> None:
+        """Drop this dataset's own table."""
+
+    @abstractmethod
+    def batch_insert(self, rows: List[Dict[str, Any]]) -> int:
+        """Insert a batch; return number of written rows."""
 
     @abstractmethod
     def search_metadata(
@@ -22,8 +26,8 @@ class RelationalStoreBase(ABC):
         metadata_filters: Optional[Dict[str, Any]] = None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Metadata filter + annotation OR match ranking, return scored hits."""
+        """Ranked metadata search on this dataset's own table."""
 
     @abstractmethod
     def close(self) -> None:
-        """Close DB connection."""
+        """Release the engine connection pool."""

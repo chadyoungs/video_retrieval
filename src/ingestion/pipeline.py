@@ -74,9 +74,24 @@ class IngestionPipeline:
         """
         Process one video: split to segments, read frames once, annotate + embed,
         return sql_batch, milvus_batch.
+        Metadata filter rule: read dataset contract from settings, based on entry's dataset_name
         """
         video_file = video_entry["video_file"]
-        base_metadata = video_entry.get("metadata", {})
+        raw_base_metadata = video_entry.get("metadata", {})
+        entry_dataset: str = raw_base_metadata.get("dataset_name", self.dataset_name)
+
+        # load field contract from settings, fallback empty if unknown dataset
+        contract = settings.DATASET_FIELD_CONTRACT.get(entry_dataset, {})
+        allowed_meta_keys = set(contract.get("allowed_metadata_keys", []))
+        milvus_payload_keys = contract.get("milvus_payload_keys", [])
+
+        # filter base metadata: only keep keys defined in this dataset's contract
+        base_metadata = {
+            k: v
+            for k, v in raw_base_metadata.items()
+            if k in allowed_meta_keys
+        }
+
         sql_batch: list[dict] = []
         milvus_batch: list[dict] = []
 
@@ -153,18 +168,20 @@ class IngestionPipeline:
                     "annotation": anno,
                     "metadata": segment_metadata,
                 }
+
+                # build milvus row:
+                # base fixed fields + dynamic payload from contract
                 milvus_row = {
                     "video_file_name": video_file_name,
                     "video_file_path": video_file_path,
                     "segment_start": s,
                     "segment_end": e,
-                    "dataset_name": self.dataset_name,
-                    "camera_channel": base_metadata.get("camera_channel", "unknown"),
-                    "clip_id": clip_id,
-                    "scene_token": base_metadata.get("scene_token"),
-                    "embedding_model": settings.embedding_model_version,
                     "clip_vector": emb,
                 }
+                # only fill milvus top-level keys defined in contract
+                for key in milvus_payload_keys:
+                    milvus_row[key] = base_metadata.get(key)
+
                 sql_batch.append(sql_row)
                 milvus_batch.append(milvus_row)
                 self.stats["inserted_segments"] += 1
@@ -201,13 +218,13 @@ class IngestionPipeline:
                     milvus_acc.extend(mv_batch)
                     self.stats["processed_videos"] += 1
 
-                    # flush when reach DB batch size
-                    while len(sql_acc) >= settings.batch_size_db or len(milvus_acc) >= settings.batch_size_db:
-                        take_sq = sql_acc[:settings.batch_size_db]
-                        take_mv = milvus_acc[:settings.batch_size_db]
-                        self._flush_batch(take_sq, take_mv)
-                        sql_acc = sql_acc[settings.batch_size_db:]
-                        milvus_acc = milvus_acc[settings.batch_size_db:]
+                # flush when reach DB batch size
+                while len(sql_acc) >= settings.batch_size_db or len(milvus_acc) >= settings.batch_size_db:
+                    take_sq = sql_acc[:settings.batch_size_db]
+                    take_mv = milvus_acc[:settings.batch_size_db]
+                    self._flush_batch(take_sq, take_mv)
+                    sql_acc = sql_acc[settings.batch_size_db:]
+                    milvus_acc = milvus_acc[settings.batch_size_db:]
 
                 # gpu memory cleanup
                 torch.cuda.empty_cache()

@@ -1,44 +1,27 @@
-"""Store factory: bind the relational and vector stores to one dataset key.
-
-The two stores stay deliberately independent: the relational store knows
-nothing about Milvus, and the vector store knows nothing about SQLAlchemy.
-
-* relational store -> per-dataset subclass of :class:`PostgresRelationalStore`;
-* vector store    -> one Milvus collection per dataset source.
-"""
+"""Factory: get relational / vector store by dataset_key."""
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
-from src.config.settings import settings
 from src.db.milvus_store import MilvusVectorStore
 from src.db.relational_base import RelationalStoreBase
-from src.db.sql_store_activitynet import ActivityNetRelationalStore
-from src.db.sql_store_nuscenes import NuScenesRelationalStore
+from src.db.sql_activitynet import ActivityNetRelationalStore
+from src.db.sql_nuscenes import NuScenesRelationalStore
 from src.db.vector_base import VectorStoreBase
 
 DatasetKey = Literal["activitynet", "nuscenes"]
 
 
 def get_relational_store(
-    dataset_key: Optional[DatasetKey] = None,
+    dataset_key: DatasetKey,
 ) -> RelationalStoreBase:
-    """Return the relational store for ``dataset_key`` (default: settings)."""
-    key = dataset_key or settings.dataset_source
-    if key == "activitynet":
+    if dataset_key == "activitynet":
         return ActivityNetRelationalStore()
-    if key == "nuscenes":
+    if dataset_key == "nuscenes":
         return NuScenesRelationalStore()
-    raise ValueError(f"Unsupported dataset_key: {key!r}")
+    raise ValueError(f"Unknown dataset_key: {dataset_key}")
 
 
-def get_vector_store(
-    dataset_key: Optional[DatasetKey] = None,
-) -> VectorStoreBase:
-    """Return the vector store; collection is mapped per dataset source."""
-    key = dataset_key or settings.dataset_source
-    collection = settings.milvus_collections.get(
-        key, settings.milvus_collections
-    )
-    return MilvusVectorStore(collection_name=collection)
+def get_vector_store(dataset_key: DatasetKey) -> VectorStoreBase:
+    return MilvusVectorStore(dataset_key=dataset_key)

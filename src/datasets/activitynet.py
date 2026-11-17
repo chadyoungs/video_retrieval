@@ -39,7 +39,6 @@ class ActivityNetAdapter(DatasetAdapterBase):
                         "dataset_name": "activitynet",
                         "dataset_version": "unknown",
                         "dataset_split": "unknown",
-                        "camera_channel": "unknown",
                     },
                 )
             )

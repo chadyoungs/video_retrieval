@@ -1,81 +1,209 @@
+"""Generic PostgreSQL store.
+
+Subclasses only bind ``row_model`` and ``annotation_fields``. The shared base
+handles connection, batch insert, metadata ranking and record mapping. Only
+columns that exist on this dataset's own table are written; unknown metadata
+or annotation keys are dropped.
+"""
+
 from __future__ import annotations
+
 import logging
-from typing import Any, List
-from sqlalchemy import create_engine, text
+from typing import Any, Dict, List, Optional, Tuple
+
+from sqlalchemy import (
+    and_,
+    case,
+    create_engine,
+    desc,
+    literal,
+    or_,
+    select,
+)
 from sqlalchemy.orm import sessionmaker
 
-from app.db.relational_base import RelationalStoreBase
-from app.config.settings import settings
+from src.config.settings import settings
+from src.db.models import Base
+from src.db.relational_base import RelationalStoreBase
 
 logger = logging.getLogger(__name__)
 
 
+# Metadata filter fields shared by both datasets. Fields missing on a
+# dataset's own table are ignored at search time.
+METADATA_FILTER_FIELDS: Tuple[str, ...] = (
+    "dataset_name",
+    "dataset_version",
+    "dataset_split",
+    "camera_channel",
+    "clip_id",
+    "scene_token",
+    "location",
+)
+
+
 class PostgresRelationalStore(RelationalStoreBase):
-    def __init__(self, dataset_key: str | None = None):
-        self.dataset_key = dataset_key
+    #: ORM row model for this dataset's own table. Set by subclasses.
+    row_model: type
+    #: Annotation fields this dataset may rank / filter. Set by subclasses.
+    annotation_fields: Tuple[str, ...] = ()
+
+    def __init__(self) -> None:
         self.engine = create_engine(settings.pg_dsn, pool_pre_ping=True)
-        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+        self._session = sessionmaker(
+            autocommit=False, autoflush=False, bind=self.engine
+        )
 
-    def init_schema(self):
-        """
-        Alembic 负责建表/迁移，这里只做校验；不要在这里写 CREATE TABLE。
-        这是关键：表结构交给 alembic，代码内不维护 DDL。
-        """
-        with self.engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        logger.info("PostgreSQL store connected, dataset_key=%s", self.dataset_key)
+    # ------------------------------------------------------------------ #
+    # Schema
+    # ------------------------------------------------------------------ #
+    def init(self) -> None:
+        # create_all / drop_all are SQLAlchemy MetaData methods; ``tables=[...]``
+        # limits the operation to this store's own table only.
+        Base.metadata.create_all(
+            self.engine, tables=[self.row_model.__table__]
+        )
+        logger.info("Table '%s' ready", self.row_model.__table__.name)
 
-    def drop(self):
-        """谨慎：业务一般不调用；如需清数据用 TRUNCATE 按 dataset_name 过滤。"""
-        logger.warning("Drop operation skipped for Postgres; use alembic downgrade or manual truncate.")
+    def drop(self) -> None:
+        Base.metadata.drop_all(
+            self.engine, tables=[self.row_model.__table__]
+        )
+        logger.warning("Table '%s' dropped", self.row_model.__table__.name)
 
-    def insert_records(self, records: List[dict[str, Any]]):
-        """批量写入，records 必须包含 dataset_name"""
-        if not records:
-            return
-        stmt = text("""
-            INSERT INTO video_segments (
-                video_file_name,
-                video_file_path,
-                segment_start,
-                segment_end,
-                annotation,
-                metadata,
-                dataset_name,
-                clip_id
+    # ------------------------------------------------------------------ #
+    # Write
+    # ------------------------------------------------------------------ #
+    def _known_columns(self) -> set[str]:
+        return {column.name for column in self.row_model.__table__.columns}
+
+    def _row_values(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        """Map a record onto this table's columns; unknown keys are dropped."""
+        annotation = item.get("annotation") or {}
+        metadata = item.get("metadata") or {}
+        known = self._known_columns()
+
+        values: Dict[str, Any] = {
+            "video_file_name": item.get("video_file_name"),
+            "video_file_path": item.get("video_file_path"),
+            "segment_start": item.get("segment_start"),
+            "segment_end": item.get("segment_end"),
+        }
+
+        # Provenance and annotation values land on matching columns only.
+        for source in (metadata, annotation):
+            for key, value in source.items():
+                if key in known:
+                    values[key] = value
+
+        for provenance in (
+            "embedding_model",
+            "annotation_model",
+            "processing_ts",
+        ):
+            if provenance in known:
+                values[provenance] = metadata.get(provenance)
+
+        return {key: value for key, value in values.items() if key in known}
+
+    def batch_insert(self, rows: List[Dict[str, Any]]) -> int:
+        if not rows:
+            return 0
+
+        objects = [self.row_model(**self._row_values(row)) for row in rows]
+        try:
+            with self._session() as session:
+                session.add_all(objects)
+                session.commit()
+            logger.info(
+                "Inserted %d rows into '%s'",
+                len(objects),
+                self.row_model.__table__.name,
             )
-            VALUES (
-                :video_file_name,
-                :video_file_path,
-                :segment_start,
-                :segment_end,
-                :annotation,
-                :metadata,
-                :dataset_name,
-                :clip_id
+            return len(objects)
+        except Exception:
+            logger.exception("Relational batch insert failed")
+            return 0
+
+    # ------------------------------------------------------------------ #
+    # Read
+    # ------------------------------------------------------------------ #
+    def search_metadata(
+        self,
+        annotation_conditions: Optional[Dict[str, Any]] = None,
+        metadata_filters: Optional[Dict[str, Any]] = None,
+        limit: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Ranked metadata search.
+
+        * annotation conditions are OR-ed together;
+        * metadata filters are AND-ed together;
+        * score = matched annotation fields / condition count, or 1.0 when
+          there are no annotation conditions.
+        """
+        ann = [
+            (key, value)
+            for key, value in (annotation_conditions or {}).items()
+            if key in self.annotation_fields
+        ]
+        columns = {
+            column.name: column
+            for column in self.row_model.__table__.columns
+        }
+        meta = [
+            (key, value)
+            for key, value in (metadata_filters or {}).items()
+            if key in METADATA_FILTER_FIELDS and key in columns
+        ]
+
+        if ann:
+            score_cases = [
+                case((columns[key] == value, 1), else_=0)
+                for key, value in ann
+            ]
+            match_count = score_cases[0]
+            for score_case in score_cases[1:]:
+                match_count = match_count + score_case
+        else:
+            match_count = literal(1)
+
+        clauses = []
+        if ann:
+            clauses.append(or_(*[columns[key] == value for key, value in ann]))
+        if meta:
+            clauses.append(and_(*[columns[key] == value for key, value in meta]))
+
+        stmt = select(
+            self.row_model, match_count.label("match_count")
+        )
+        if clauses:
+            stmt = stmt.where(*clauses)
+        stmt = stmt.order_by(desc(match_count)).limit(limit)
+
+        try:
+            with self._session() as session:
+                rows_out = session.execute(stmt).all()
+        except Exception:
+            logger.exception("Relational query failed")
+            return []
+
+        n_conditions = len(ann)
+        results: List[Dict[str, Any]] = []
+        for row, match_count in rows_out:
+            hit = {
+                column.name: getattr(row, column.name)
+                for column in self.row_model.__table__.columns
+            }
+            hit["score"] = (
+                float(match_count) / n_conditions
+                if n_conditions > 0
+                else 1.0
             )
-        """)
-        with self.engine.begin() as conn:
-            conn.execute(stmt, records)
-        logger.debug("Inserted %d rows to postgres, dataset=%s", len(records), self.dataset_key)
+            results.append(hit)
+        return results
 
-    def search_metadata(self, filter_spec: dict[str, Any]) -> List[dict[str, Any]]:
-        """
-        元数据过滤查询，兼容你原有规则检索接口；
-        filter_spec 示例：{"dataset_name": "activitynet", "clip_id": "xxx"}
-        复杂 OR/AND 规则可以在这层继续扩展。
-        """
-        conditions = []
-        params = {}
-        for idx, (k, v) in enumerate(filter_spec.items()):
-            key = f"p_{idx}"
-            conditions.append(f"{k} = :{key}")
-            params[key] = v
-        where_clause = " AND ".join(conditions) if conditions else "1=1"
-        sql = text(f"SELECT * FROM video_segments WHERE {where_clause}")
-        with self.engine.connect() as conn:
-            res = conn.execute(sql, params)
-            return [dict(r) for r in res.fetchall()]
-
-    def close(self):
+    # ------------------------------------------------------------------ #
+    # Lifecycle
+    # ------------------------------------------------------------------ #
+    def close(self) -> None:
         self.engine.dispose()
