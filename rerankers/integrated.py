@@ -6,9 +6,9 @@ import torch
 import requests
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from app.config.settings import settings
-from app.rerankers.base import BaseReranker, RetrievalItem, RerankedItem
-from app.constants.rerank_conf import RERANK_DATASET_CONF
+from src.config.settings import settings
+from src.rerankers.base import BaseReranker, RetrievalItem, RerankedItem
+from src.constants.rerank_conf import RERANK_DATASET_CONF
 
 logger = logging.getLogger(__name__)
 
