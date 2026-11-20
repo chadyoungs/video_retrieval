@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.annotators.base import BaseAnnotator
-from src.annotators.rules import (
+from annotators.base import BaseAnnotator
+from annotators.rules import (
     ANNOTATION_RULES_NUSCENES,
     DEFAULT_ANNOTATION_NUSCENES,
 )
@@ -15,5 +15,5 @@ class NuScenesAnnotator(BaseAnnotator):
     rules = ANNOTATION_RULES_NUSCENES
     default_annotation = DEFAULT_ANNOTATION_NUSCENES
 
-    def dataset_key(self) -> str:
+    def dataset_name(self) -> str:
         return "nuscenes"

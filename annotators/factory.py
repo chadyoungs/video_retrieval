@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Literal
 
-from src.annotators.activitynet import ActivityNetAnnotator
-from src.annotators.base import BaseAnnotator
-from src.annotators.nuscenes import NuScenesAnnotator
-from src.config.settings import settings
+from annotators.activitynet import ActivityNetAnnotator
+from annotators.base import BaseAnnotator
+from annotators.nuscenes import NuScenesAnnotator
+from config.settings import settings
 
-DatasetKey = Literal["activitynet", "nuscenes"]
+DatasetName = Literal["activitynet", "nuscenes"]
 
 
-def get_annotator(dataset_key: DatasetKey) -> BaseAnnotator:
-    """Return the annotator for ``dataset_key``."""
-    if dataset_key == "activitynet":
+def get_annotator(dataset_name: DatasetName) -> BaseAnnotator:
+    """Return the annotator for ``dataset_name``."""
+    if dataset_name == "activitynet":
         return ActivityNetAnnotator()
-    if dataset_key == "nuscenes":
+    if dataset_name == "nuscenes":
         return NuScenesAnnotator()
-    raise ValueError(f"Unsupported dataset_key: {dataset_key!r}")
+    raise ValueError(f"Unsupported dataset_name: {dataset_name!r}")
 
 
 def get_default_annotator() -> BaseAnnotator:

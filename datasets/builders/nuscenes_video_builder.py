@@ -1,11 +1,9 @@
 """Generate overlapping sliding-window CAM_FRONT clips for nuScenes.
 
-This replaces the legacy per-scene single-video builder in
-``data/nuscenes_video_builder.py``. The legacy record shape, mapping JSON
-fields and ego-motion statistics are preserved; the main change is that one
-scene is cut into fixed-duration segments with configurable overlap, and the
-mapping list is later handed to the relational / vector stores as
-``SegmentRecord`` metadata.
+The legacy record shape, mapping JSON fields and ego-motion statistics are 
+preserved; the main change is that onescene is cut into fixed-duration 
+segments with configurable overlap, and the mapping list is later handed 
+to the relational / vector stores as ``SegmentRecord`` metadata.
 
 Segment boundaries follow source timestamps (microseconds), so irregular
 sample rates are handled correctly. Overlap is expressed in seconds:
@@ -27,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 
-from src.config.settings import settings
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 

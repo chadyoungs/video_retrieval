@@ -22,16 +22,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 
-from app.config.settings import settings
-from app.db.relational_base import RelationalStoreBase
-from app.db.store_factory import get_relational_store, get_vector_store
-from app.db.vector_base import VectorStoreBase
-from app.encoders.base import VideoEncoderBase
-from app.encoders.factory import get_encoder, get_text_encoder
-from app.encoders.text_encoder import TextEncoder
-from app.encoders.video_loader import read_video_frames_raw
-from app.rerankers.base import BaseReranker, RetrievalItem
-from app.rerankers.factory import get_reranker
+from config.settings import settings
+from db.relational_base import RelationalStoreBase
+from db.store_factory import get_relational_store, get_vector_store
+from db.vector_base import VectorStoreBase
+from encoders.base import VideoEncoderBase
+from encoders.factory import get_encoder, get_text_encoder
+from encoders.text_encoder import TextEncoder
+from encoders.video_loader import read_video_frames_raw
+from rerankers.base import BaseReranker, RetrievalItem
+from rerankers.factory import get_reranker
 
 logger = logging.getLogger("app.retrieval")
 

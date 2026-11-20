@@ -2,8 +2,7 @@
 
 Subclasses only bind ``row_model`` and ``annotation_fields``. The shared base
 handles connection, batch insert, metadata ranking and record mapping. Only
-columns that exist on this dataset's own table are written; unknown metadata
-or annotation keys are dropped.
+columns that exist on this dataset's own table are written.
 """
 
 from __future__ import annotations
@@ -19,12 +18,15 @@ from sqlalchemy import (
     literal,
     or_,
     select,
+    table,
+    text,
+    func,
 )
 from sqlalchemy.orm import sessionmaker
 
-from src.config.settings import settings
-from src.db.models import Base
-from src.db.relational_base import RelationalStoreBase
+from config.settings import settings
+from db.models import Base
+from db.relational_base import RelationalStoreBase
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +37,7 @@ METADATA_FILTER_FIELDS: Tuple[str, ...] = (
     "dataset_name",
     "dataset_version",
     "dataset_split",
-    "camera_channel",
     "clip_id",
-    "scene_token",
-    "location",
 )
 
 
@@ -66,10 +65,15 @@ class PostgresRelationalStore(RelationalStoreBase):
         logger.info("Table '%s' ready", self.row_model.__table__.name)
 
     def drop(self) -> None:
-        Base.metadata.drop_all(
-            self.engine, tables=[self.row_model.__table__]
-        )
-        logger.warning("Table '%s' dropped", self.row_model.__table__.name)
+        table = self.row_model.__table__
+        Base.metadata.drop_all(self.engine, tables=[table])
+        seq_name = f"{table.name}_id_seq"
+
+        with self.engine.connect() as conn:
+            escaped_seq = conn.execute(func.quote_ident(seq_name)).scalar()
+            conn.execute(text(f"DROP SEQUENCE IF EXISTS {escaped_seq};"))
+            conn.commit()
+        logger.warning("Table '%s' dropped, sequence '%s' cleared", table.name, seq_name)
 
     # ------------------------------------------------------------------ #
     # Write
@@ -78,33 +82,33 @@ class PostgresRelationalStore(RelationalStoreBase):
         return {column.name for column in self.row_model.__table__.columns}
 
     def _row_values(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        """Map a record onto this table's columns; unknown keys are dropped."""
-        annotation = item.get("annotation") or {}
-        metadata = item.get("metadata") or {}
+        """
+        Map record to table columns.
+        Rule:
+        1. Take all top-level keys from input item first
+        2. Then allow metadata / annotation to override values (legacy compatibility)
+        3. Final filter: only keep keys present in known table columns
+        4. Add debug logging for tracing missing critical fields like segment_id
+        """
         known = self._known_columns()
 
-        values: Dict[str, Any] = {
-            "video_file_name": item.get("video_file_name"),
-            "video_file_path": item.get("video_file_path"),
-            "segment_start": item.get("segment_start"),
-            "segment_end": item.get("segment_end"),
-        }
+        values = item.copy()
 
-        # Provenance and annotation values land on matching columns only.
+        annotation = item.get("annotation") or {}
+        metadata = item.get("metadata") or {}
         for source in (metadata, annotation):
             for key, value in source.items():
                 if key in known:
                     values[key] = value
-
-        for provenance in (
-            "embedding_model",
-            "annotation_model",
-            "processing_ts",
-        ):
-            if provenance in known:
-                values[provenance] = metadata.get(provenance)
-
-        return {key: value for key, value in values.items() if key in known}
+        
+        # filter the unknow keys
+        final_values = {
+            key: val
+            for key, val in values.items()
+            if key in known
+        }
+        
+        return final_values
 
     def batch_insert(self, rows: List[Dict[str, Any]]) -> int:
         if not rows:

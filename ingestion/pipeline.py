@@ -6,20 +6,21 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from pathlib import Path
+
 import torch
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
-from src.annotators.factory import get_default_annotator
-from src.db.store_factory import get_relational_store, get_vector_store
-from src.encoders.factory import get_default_encoder
-from src.encoders.video_loader import read_video_frames_raw
-from src.ingestion.segmenter import segment_bounds
-from src.utils.dataset_adapter import load_video_entries
-from src.config.settings import settings
+from annotators.factory import get_default_annotator
+from db.store_factory import get_relational_store, get_vector_store
+from encoders.factory import get_default_encoder
+from encoders.video_loader import read_video_frames_raw
+from ingestion.segmenter import segment_bounds
+from utils.dataset_adapter import load_video_entries
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
-
 
 class IngestionPipeline:
     def __init__(
@@ -36,10 +37,10 @@ class IngestionPipeline:
         self.vec_store = get_vector_store(dataset_name=dataset_name)
 
         if drop_sql:
-            logger.info("Drop SQL table for dataset %s", dataset_name)
+            logger.info("Drop SQL table for %s", self.dataset_name)
             self.rel_store.drop()
         if drop_milvus:
-            logger.info("Drop Milvus collection for dataset %s", dataset_name)
+            logger.info("Drop Milvus collection for %s", self.dataset_name)
             self.vec_store.drop()
 
         self.rel_store.init()
@@ -47,6 +48,11 @@ class IngestionPipeline:
 
         self.encoder = get_default_encoder()
         self.annotator = get_default_annotator()
+
+        # buffer for db batch insert, to reduce frequent I/O
+        self._sql_buffer: list[dict[str, Any]] = []
+        self._milvus_buffer: list[dict[str, Any]] = []
+        self._buffer_cap = settings.batch_size_db 
 
         self.stats = {
             "total_videos": 0,
@@ -57,141 +63,122 @@ class IngestionPipeline:
             "inserted_segments": 0,
         }
 
-    def _flush_batch(self, sql_batch: list[dict[str, Any]], milvus_batch: list[dict[str, Any]]):
-        if not sql_batch and not milvus_batch:
+    def _flush_buffer(self) -> None:
+        if not self._sql_buffer and not self._milvus_buffer:
             return
         try:
-            if sql_batch:
-                self.rel_store.batch_insert(sql_batch)
-            if milvus_batch:
-                self.vec_store.batch_insert(milvus_batch)
-            logger.debug("Flushed %d sql rows, %d milvus rows", len(sql_batch), len(milvus_batch))
+            sql_len = len(self._sql_buffer)
+            milvus_len = len(self._milvus_buffer)
+
+            if sql_len > 0:
+                self.rel_store.batch_insert(self._sql_buffer)
+            if milvus_len > 0:
+                self.vec_store.batch_insert(self._milvus_buffer)
+            
+            # clear buffer
+            self._sql_buffer.clear()
+            self._milvus_buffer.clear()
+
         except Exception as e:
-            logger.exception("Batch insert failed, discard this batch")
-            self.stats["skipped_segments"] += len(sql_batch)
+            logger.exception("Buffer flush failed, segments discarded")
+            self.stats["skipped_segments"] += sql_len
 
-    def _process_single_video(self, video_entry: dict[str, Any]) -> tuple[list[dict], list[dict]]:
-        """
-        Process one video: split to segments, read frames once, annotate + embed,
-        return sql_batch, milvus_batch.
-        Metadata filter rule: read dataset contract from settings, based on entry's dataset_name
-        """
+    def _push_row(self, sql_row: dict | None, milvus_row: dict | None) -> None:
+        if sql_row is not None:
+            self._sql_buffer.append(sql_row)
+
+        if milvus_row is not None:
+            self._milvus_buffer.append(milvus_row)
+
+        if len(self._sql_buffer) >= self._buffer_cap or len(self._milvus_buffer) >= self._buffer_cap:
+            self._flush_buffer()
+
+    def _process_single_video(self, video_entry: dict[str, Any]) -> None:
         video_file = video_entry["video_file"]
-        raw_base_metadata = video_entry.get("metadata", {})
-        entry_dataset: str = raw_base_metadata.get("dataset_name", self.dataset_name)
-
-        # load field contract from settings, fallback empty if unknown dataset
-        contract = settings.DATASET_FIELD_CONTRACT.get(entry_dataset, {})
-        allowed_meta_keys = set(contract.get("allowed_metadata_keys", []))
-        milvus_payload_keys = contract.get("milvus_payload_keys", [])
-
-        # filter base metadata: only keep keys defined in this dataset's contract
-        base_metadata = {
-            k: v
-            for k, v in raw_base_metadata.items()
-            if k in allowed_meta_keys
-        }
-
-        sql_batch: list[dict] = []
-        milvus_batch: list[dict] = []
-
+        raw_meta = video_entry.get("metadata", {})
+        entry_dataset: str = raw_meta.get("dataset_name", self.dataset_name)
         try:
-            seg_starts, seg_ends = segment_bounds(video_file, settings.clip_duration_sec)
+            seg_starts, seg_ends = segment_bounds(video_file, settings.clip_duration_sec, settings.clip_overlap_sec)
             if not seg_starts:
-                return [], []
+                logger.warning("No segments generated for %s", video_file)
+                return
 
-            segments_raw_frames = []
             for s, e in zip(seg_starts, seg_ends):
+                self.stats["total_segments"] += 1
                 frames = read_video_frames_raw(
                     video_path=video_file,
                     start=s,
                     end=e,
                     sample_rate=settings.frame_sampling_rate,
                 )
-                segments_raw_frames.append(frames or [])
-
-            # annotate all segments
-            annotate_results = []
-            for s, e, frames in zip(seg_starts, seg_ends, segments_raw_frames):
                 if not frames:
-                    annotate_results.append(None)
+                    logger.warning("Segment [%.2f,%.2f] no frames, skip", s, e)
+                    self.stats["skipped_segments"] += 1
                     continue
+
+                # annotation
                 anno = self.annotator.annotate(
-                    video_file=video_file,
+                    video_path=video_file,
                     start=s,
                     end=e,
                     sample_rate=settings.frame_sampling_rate,
                     preloaded_frames=frames,
                 )
-                annotate_results.append(anno)
 
-            # embed all segments
-            embed_results = []
-            for s, e, frames in zip(seg_starts, seg_ends, segments_raw_frames):
-                if not frames:
-                    embed_results.append(None)
-                    continue
+                # embedding into vector
                 emb = self.encoder.encode(
-                    video_file=video_file,
+                    video_path=video_file,
                     start=s,
                     end=e,
                     preloaded_frames=frames,
                 )
-                embed_results.append(emb)
 
-            video_file_name = os.path.basename(video_file)
-            video_file_path = os.path.dirname(video_file)
-
-            for s, e, emb, anno in zip(seg_starts, seg_ends, embed_results, annotate_results):
                 if emb is None or anno is None:
+                    logger.warning("Segment [%.2f,%.2f] emb/anno is None, skip", s, e)
                     self.stats["skipped_segments"] += 1
                     continue
-
-                clip_id = base_metadata.get("clip_id", video_file_name)
-                segment_id = f"{clip_id}_{int(s * 1000)}_{int(e * 1000)}"
-
-                segment_metadata = {
-                    **base_metadata,
+                
+                video_file_name = os.path.basename(video_file)
+                video_file_path_dir = os.path.dirname(video_file)
+                clip_id = Path(video_file_name).stem
+                segment_id = f"{entry_dataset}_{clip_id}_{int(s * 1000)}_{int(e * 1000)}"
+               
+                sql_row = {
                     "segment_id": segment_id,
-                    "embedding_model": settings.embedding_model_version,
+                    "video_file_name": video_file_name,
+                    "video_file_path": video_file_path_dir,
+                    "segment_start": s,
+                    "segment_end": e,
+                    "clip_id": clip_id,
+                    "dataset_name": entry_dataset,
+                    "dataset_version": raw_meta.get("dataset_version"),
+                    "dataset_split": raw_meta.get("dataset_split"),
                     "annotation_model": settings.annotation_model_version,
                     "processing_ts": datetime.now(timezone.utc).isoformat(),
-                    "clip_file_name": video_file_name,
-                    "clip_file_path": video_file_path,
+                    **anno,
                 }
 
-                sql_row = {
-                    "video_file_name": video_file_name,
-                    "video_file_path": video_file_path,
-                    "segment_start": s,
-                    "segment_end": e,
-                    "annotation": anno,
-                    "metadata": segment_metadata,
-                }
-
-                # build milvus row:
-                # base fixed fields + dynamic payload from contract
+                # milvus data
                 milvus_row = {
+                    "segment_id": segment_id,
                     "video_file_name": video_file_name,
-                    "video_file_path": video_file_path,
+                    "video_file_path": video_file_path_dir,
                     "segment_start": s,
                     "segment_end": e,
+                    "dataset_name": entry_dataset,
+                    "clip_id": clip_id,
+                    "embedding_model": settings.embedding_model_version,
                     "clip_vector": emb,
                 }
-                # only fill milvus top-level keys defined in contract
-                for key in milvus_payload_keys:
-                    milvus_row[key] = base_metadata.get(key)
-
-                sql_batch.append(sql_row)
-                milvus_batch.append(milvus_row)
+                
+                self._push_row(sql_row, milvus_row)
                 self.stats["inserted_segments"] += 1
 
-        except Exception as e:
-            logger.exception("Failed processing video %s", video_file)
-            self.stats["failed_videos"] += 1
-            return [], []
+            self.stats["processed_videos"] += 1
 
-        return sql_batch, milvus_batch
+        except Exception as e:
+            logger.exception("Process video failed: %s", video_file)
+            self.stats["failed_videos"] += 1
 
     def run(self):
         video_entries = load_video_entries()
@@ -199,40 +186,11 @@ class IngestionPipeline:
             video_entries = video_entries[:self.limit]
         self.stats["total_videos"] = len(video_entries)
 
-        sql_acc: list[dict] = []
-        milvus_acc: list[dict] = []
-
         with tqdm(total=len(video_entries), desc="Ingestion") as pbar:
-            for i in range(0, len(video_entries), settings.batch_video):
-                batch = video_entries[i:i + settings.batch_video]
-                parallel_out = Parallel(
-                    n_jobs=settings.num_processes,
-                    backend="threading",
-                )(
-                    delayed(self._process_single_video)(entry)
-                    for entry in batch
-                )
+            for entry in video_entries:
+                self._process_single_video(entry)
+                pbar.update(1)
+        
+        self._flush_buffer()
 
-                for sq_batch, mv_batch in parallel_out:
-                    sql_acc.extend(sq_batch)
-                    milvus_acc.extend(mv_batch)
-                    self.stats["processed_videos"] += 1
-
-                # flush when reach DB batch size
-                while len(sql_acc) >= settings.batch_size_db or len(milvus_acc) >= settings.batch_size_db:
-                    take_sq = sql_acc[:settings.batch_size_db]
-                    take_mv = milvus_acc[:settings.batch_size_db]
-                    self._flush_batch(take_sq, take_mv)
-                    sql_acc = sql_acc[settings.batch_size_db:]
-                    milvus_acc = milvus_acc[settings.batch_size_db:]
-
-                # gpu memory cleanup
-                torch.cuda.empty_cache()
-                gc.collect()
-                pbar.update(len(batch))
-
-        # final flush
-        self._flush_batch(sql_acc, milvus_acc)
-
-        logger.info("Ingestion finished, stats: %s", self.stats)
-        return self.stats
+        logger.info("Ingest finished. stats: %s", self.stats)

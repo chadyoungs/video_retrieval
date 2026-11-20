@@ -1,17 +1,17 @@
 from __future__ import annotations
 from typing import Literal
 
-from src.config.settings import settings
-from src.encoders.base import VideoEncoderBase
-from src.encoders.keyframe_encoder import KeyframeEncoder
-from src.encoders.text_encoder import TextEncoder
+from config.settings import settings
+from encoders.base import VideoEncoderBase
+from encoders.keyframe_encoder import KeyframeEncoder
+from encoders.text_encoder import TextEncoder
 from encoders.wholeclip_encoder import CLIP4ClipVideoEncoder
 
 EncoderType = Literal["keyframes", "wholeclip"]
 
 
 def get_encoder(encoder_type: EncoderType) -> VideoEncoderBase:
-    if encoder_type == "keyframe":
+    if encoder_type == "keyframes":
         return KeyframeEncoder()
     elif encoder_type == "wholeclip":
         return CLIP4ClipVideoEncoder()

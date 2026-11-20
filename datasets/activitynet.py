@@ -11,8 +11,8 @@ import logging
 from pathlib import Path
 from typing import List
 
-from src.config.settings import settings
-from src.datasets.base import DatasetAdapterBase, VideoEntry
+from config.settings import settings
+from datasets.base import DatasetAdapterBase, VideoEntry
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class ActivityNetAdapter(DatasetAdapterBase):
     """Discover ActivityNet videos matching the configured file format."""
 
     def discover(self) -> List[VideoEntry]:
-        root = Path(settings.activitynet_root)
+        root = Path(settings.activitynet_data_root)
         if not root.exists():
             logger.warning("ActivityNet data root does not exist: %s", root)
             return []

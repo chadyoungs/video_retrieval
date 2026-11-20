@@ -6,17 +6,17 @@ import torch
 import requests
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from src.config.settings import settings
-from src.rerankers.base import BaseReranker, RetrievalItem, RerankedItem
-from src.constants.rerank_conf import RERANK_DATASET_CONF
+from config.settings import settings
+from rerankers.base import BaseReranker, RetrievalItem, RerankedItem
+from config.settings import RERANK_DATASET_CONF
 
 logger = logging.getLogger(__name__)
 
 
 class IntegratedReranker(BaseReranker):
-    def __init__(self, dataset_key: str):
-        self.dataset_key = dataset_key
-        self.conf = RERANK_DATASET_CONF[dataset_key]
+    def __init__(self, dataset_name: str):
+        self.dataset_name = dataset_name
+        self.conf = RERANK_DATASET_CONF[dataset_name]
         self.annotation_fields = self.conf["annotation_fields"]
         self.rule_match_mode = self.conf["rule_match_mode"]
 

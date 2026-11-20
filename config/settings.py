@@ -12,160 +12,18 @@ class Settings(BaseSettings):
     # ========= Milvus =========
     milvus_host: str = "localhost"
     milvus_port: int = 19530
-    milvus_alias: str = "video_retrieval_milvus"
+    milvus_alias: str = "video_retrieval"
     # dataset -> milvus collection mapping
     milvus_collections: dict[Literal["activitynet", "nuscenes"], str] = {
         "activitynet": "activitynet_clip_embedding",
         "nuscenes": "nuscenes_clip_embedding",
     }
-    # legacy single collection (old code fallback)
+    # legacy single collection
     collection_name: str = "video_reverse_search_demo_index"
     milvus_metric_type: str = "COSINE"
     
     # ======== PostgreSQL =========
-    pg_dsn: str = "postgresql://user:password@127.0.0.1:5432/video_retrieval"
-    
-    # ======= Dataset Storage Contract: separate PG table + separate Milvus collection ========
-    DATASET_STORAGE_CONTRACT: dict[str, dict[str, Any]] = {
-        "activitynet": {
-            "pg_table_name": "activitynet_video_segments",
-            "milvus_collection": "activitynet_clip_index",
-            # 本数据集PG表拥有的列（ORM model决定，这里仅用于pipeline过滤）
-            "pg_columns": [
-                "video_file_name",
-                "video_file_path",
-                "segment_start",
-                "segment_end",
-                "clip_id",
-                "segment_id",
-                "dataset_name",
-                "dataset_version",
-                "dataset_split",
-                "camera_channel",
-                "annotation",
-                "embedding_model",
-                "annotation_model",
-                "processing_ts",
-                "scene_env",
-                "scene_type",
-                "weather",
-                "lighting",
-                "time_of_day",
-            ],
-            # Milvus collection 标量字段
-            "milvus_scalar_fields": [
-                "video_file_name",
-                "video_file_path",
-                "segment_start",
-                "segment_end",
-                "dataset_name",
-                "clip_id",
-            ]
-        },
-        "nuscenes": {
-            "pg_table_name": "nuscenes_video_segments",
-            "milvus_collection": "nuscenes_clip_index",
-            "pg_columns": [
-                "video_file_name",
-                "video_file_path",
-                "segment_start",
-                "segment_end",
-                "clip_id",
-                "segment_id",
-                "dataset_name",
-                "dataset_version",
-                "dataset_split",
-                "camera_channel",
-                "annotation",
-                "embedding_model",
-                "annotation_model",
-                "processing_ts",
-                "scene_token",
-                "sample_start_token",
-                "sample_end_token",
-                "log_token",
-                "location",
-                "map_token",
-                "clip_start_ts",
-                "clip_end_ts",
-                "clip_fps",
-                "clip_frame_count",
-                "ego_avg_speed_mps",
-                "ego_max_speed_mps",
-                "quality_flag",
-            ],
-            "milvus_scalar_fields": [
-                "video_file_name",
-                "video_file_path",
-                "segment_start",
-                "segment_end",
-                "dataset_name",
-                "camera_channel",
-                "clip_id",
-                "scene_token",
-            ]
-        }
-    }
-
-    # ======== Dataset metadata & storage field contracts =========
-    DATASET_FIELD_CONTRACT: dict[str, dict[str, list[str]]] = {
-        "activitynet": {
-            "allowed_metadata_keys": [
-                "dataset_name",
-                "dataset_version",
-                "dataset_split",
-            ],
-            "milvus_payload_keys": [
-                "dataset_name",
-                "clip_id",
-            ],
-            # PostgreSQL 固定表字段（Alembic建表用，固定列，不在jsonb里）
-            "sql_fixed_columns": [
-                "video_file_name",
-                "video_file_path",
-                "segment_start",
-                "segment_end",
-                "annotation",
-                "metadata",
-            ]
-        },
-        "nuscenes": {
-            "allowed_metadata_keys": [
-                "dataset_name",
-                "dataset_version",
-                "dataset_split",
-                "camera_channel",
-                "clip_id",
-                "scene_token",
-                "sample_start_token",
-                "sample_end_token",
-                "log_token",
-                "location",
-                "map_token",
-                "clip_start_ts",
-                "clip_end_ts",
-                "clip_fps",
-                "clip_frame_count",
-                "ego_avg_speed_mps",
-                "ego_max_speed_mps",
-                "quality_flag",
-            ],
-            "milvus_payload_keys": [
-                "dataset_name",
-                "camera_channel",
-                "clip_id",
-                "scene_token",
-            ],
-            "sql_fixed_columns": [
-                "video_file_name",
-                "video_file_path",
-                "segment_start",
-                "segment_end",
-                "annotation",
-                "metadata",
-            ]
-        }
-    }
+    pg_dsn: str = "postgresql://devuser:pass123@127.0.0.1:5432/postgres"
 
     # ========= Ollama VLM Annotation =========
     annotation_enable: bool = True
@@ -176,8 +34,20 @@ class Settings(BaseSettings):
     ollama_timeout: int = 600
     max_retries: int = 3
     retry_backoff_factor: float = 1.5
+    
+    @property
+    def annotation_model_version(self) -> str:
+        return self.ollama_model
 
     # ========= Semantic Encoder / CLIP / SigLIP =========
+    # ========= huggingface Model Cache =========
+    model_cache_dir: str = "./models"
+    hf_endpoint: str = "https://hf-mirror.com"
+    
+    # ========= Frame / Embedding Policy =========
+    encoder_type: Literal["whole_clip", "keyframes"] = "keyframes"
+    keyframe_count: int = 5  # valid while encoder_type="keyframes"
+        
     semantic_model_tier: Literal["base", "advanced"] = "base"
     base_clip_model_name: str = "openai/clip-vit-base-patch32"
     advanced_clip_model_name: str = "google/siglip-so400m-patch14-384"
@@ -200,10 +70,6 @@ class Settings(BaseSettings):
     def embedding_model_version(self) -> str:
         return self.clip_model_name
 
-    @property
-    def annotation_model_version(self) -> str:
-        return self.ollama_model
-
     # ========= Dataset Source =========
     dataset_source: Literal["activitynet", "nuscenes"] = "activitynet"
 
@@ -220,26 +86,18 @@ class Settings(BaseSettings):
     nuscenes_camera_channel: str = "CAM_FRONT"
     
     nuscenes_meta_root: str = "/mnt/sdb/datasets/nuscenes-data/nuscenes/{nuscenes_dataset_version}"
-    builder_output_fps: float = 12.0
-    
-    # ========= Model Cache =========
-    model_cache_dir: str = "./models"
-    hf_endpoint: str = "https://hf-mirror.com"
-    
-    # ========= Frame / Embedding Policy =========
-    encoder_type: Literal["whole_clip", "keyframes"] = "keyframes"
-    keyframe_count: int = 5  # valid while encoder_type="keyframes"
+    builder_output_fps: float = 2.0
    
     # ========= Clip slicing =========
     clip_duration_sec: float = 10.0
     frame_sampling_rate: int = 10
-    clip_overlap_sec: float = 0.0
+    clip_overlap_sec: float = 2.0
 
     # ========= Batch / Compute =========
-    batch_video: int = 2
-    batch_size_db: int = 5
+    batch_video: int = 1
+    batch_size_db: int = 5 # valid for both pg and milvus
     num_workers: int = 1
-    num_processes: int = 2
+    num_processes: int = 1
 
     # ========= Rerank =========
     reranker_top_k: int = 10
@@ -247,6 +105,18 @@ class Settings(BaseSettings):
     reranker_weight_rule: float = 0.4
     reranker_weight_cross_encoder: float = 0.3
     reranker_weight_vlm: float = 0.3
+    
+    RERANK_DATASET_CONF: dict[Literal["activitynet", "nuscenes"], dict[str, Any]] = {
+        "activitynet": {
+            "rule_weight": reranker_weight_rule,
+            "vlm_weight": reranker_weight_vlm,
+        },
+        "nuscenes": {
+            "rule_weight": reranker_weight_rule,
+            "vlm_weight": reranker_weight_vlm,
+        },
+    }
+    
     cross_encoder_model_name: str = "BAAI/bge-reranker-base"
 
 

@@ -99,23 +99,23 @@ def _local_maxima_indices(
 
 
 def select_keyframes(
-    frames: Sequence[np.ndarray], top_n: int
+    frames: Sequence[np.ndarray], max_k: int
 ) -> List[np.ndarray]:
-    """Return up to ``top_n`` keyframes; empty list for invalid input."""
-    if not frames or top_n <= 0:
+    """Return up to ``max_k`` keyframes; empty list for invalid input."""
+    if not frames or max_k <= 0:
         return []
-    if len(frames) <= top_n:
+    if len(frames) <= max_k:
         return list(frames)
 
     diffs = _frame_diffs(frames)
     votes = Counter(
-        _top_order_indices(diffs, top_n)
+        _top_order_indices(diffs, max_k)
         + _threshold_indices(diffs)
         + _local_maxima_indices(diffs)
     )
     # Most votes first; deterministic tie-break on the lower frame index.
     ranked = sorted(votes.items(), key=lambda item: (-item[1], item[0]))
-    indices = [idx for idx, _ in ranked[:top_n]]
+    indices = [idx for idx, _ in ranked[:max_k]]
     return [frames[i] for i in indices]
 
 

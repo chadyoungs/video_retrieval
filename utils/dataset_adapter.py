@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List
 
-from src.config.settings import settings
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 

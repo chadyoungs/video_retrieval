@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.annotators.base import BaseAnnotator
-from src.annotators.rules import (
+from annotators.base import BaseAnnotator
+from annotators.rules import (
     ANNOTATION_RULES_ACTIVITYNET,
     DEFAULT_ANNOTATION_ACTIVITYNET,
 )
@@ -15,5 +15,5 @@ class ActivityNetAnnotator(BaseAnnotator):
     rules = ANNOTATION_RULES_ACTIVITYNET
     default_annotation = DEFAULT_ANNOTATION_ACTIVITYNET
 
-    def dataset_key(self) -> str:
+    def dataset_name(self) -> str:
         return "activitynet"

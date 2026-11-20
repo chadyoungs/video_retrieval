@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-MAX_SEMANTIC_SUMMARY_WORDS = 30
+MAX_SEMANTIC_SUMMARY_WORDS = 50
 
 SCENE_TYPE_VALUES = [
     "street",
@@ -36,8 +36,8 @@ SCENE_TYPE_VALUES = [
 ANNOTATION_RULES_ACTIVITYNET: Dict[str, List[str]] = {
     "scene_env": ["indoor", "outdoor", "semi_outdoor", "unknown"],
     "scene_type": SCENE_TYPE_VALUES,
-    "weather": ["sunny", "cloudy", "rainy", "foggy", "snowy", "unknown"],
-    "lighting": ["bright", "normal", "dim", "indoor_light"],
+    "people_count": ["0", "single", "few", "crowd", "unknown"],
+    "lighting": ["natural_light", "dim", "indoor_light", "unknown"],
     "time_of_day": [
         "dawn",
         "morning",
@@ -51,37 +51,53 @@ ANNOTATION_RULES_ACTIVITYNET: Dict[str, List[str]] = {
 
 # NuScenes: full driving-context annotation set.
 ANNOTATION_RULES_NUSCENES: Dict[str, List[str]] = {
-    **ANNOTATION_RULES_ACTIVITYNET,
-    "person_count": ["0", "single", "few", "crowd"],
     "driving_context": [
-        "city_driving",
-        "highway",
-        "intersection",
-        "parking_lot",
-        "residential",
+            "urban_street",
+            "highway",
+            "intersection",
+            "roundabout",
+            "tunnel",
+            "bridge",
+            "underpass",
+            "parking_lot",
+            "residential",
+            "other",
+            "unknown",
+        ],
+    "weather": ["clear", "cloudy", "rainy", "snowy", "foggy", "unknown"],
+    "people_count": ["0", "single", "few", "crowd", "unknown"],
+    "lighting": ["daylight", "overcast", "night", "artificial_light", "unknown"],
+    "time_of_day": [
+        "dawn",
+        "morning",
+        "noon",
+        "afternoon",
+        "dusk",
+        "night",
         "unknown",
     ],
+    "people_count": ["0", "single", "few", "crowd", "unknown"],
+    "cyclist_presence": ["none", "single", "few", "many", "unknown"],
     "road_user_density": ["empty", "sparse", "moderate", "dense", "unknown"],
-    "traffic_flow": ["free_flow", "slow", "congested", "stopped", "unknown"],
+    "traffic_flow": ["free_flow", "moving_slow", "congested", "stopped", "unknown"],
 }
 
 DEFAULT_ANNOTATION_ACTIVITYNET: Dict[str, str] = {
     "scene_env": "unknown",
     "scene_type": "other",
-    "weather": "unknown",
-    "lighting": "normal",
+    "people_count": "unknown",
+    "lighting": "unknown",
     "time_of_day": "unknown",
     "semantic_summary": "unknown",
 }
 
 DEFAULT_ANNOTATION_NUSCENES: Dict[str, str] = {
-    "scene_env": "unknown",
-    "scene_type": "other",
-    "weather": "unknown",
-    "lighting": "normal",
-    "time_of_day": "unknown",
-    "person_count": "0",
     "driving_context": "unknown",
+    "weather": "unknown",
+    "people_count": "unknown",
+    "lighting": "unknown",
+    "time_of_day": "unknown",
+    "cyclist_presence": "unknown",
     "road_user_density": "unknown",
     "traffic_flow": "unknown",
     "semantic_summary": "unknown",

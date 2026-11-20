@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from tokenize import String
 from typing import Any, Dict, List, Optional, Tuple
 
 from pymilvus import (
@@ -14,8 +15,8 @@ from pymilvus import (
     utility,
 )
 
-from src.config.settings import settings
-from src.db.vector_base import VectorStoreBase
+from config.settings import settings
+from db.vector_base import VectorStoreBase
 
 logger = logging.getLogger(__name__)
 
@@ -25,39 +26,38 @@ ScalarSpec = Tuple[str, DataType, Optional[int]]
 
 _SCALAR_SCHEMA: Dict[str, List[ScalarSpec]] = {
     "activitynet": [
-        ("video_file_name", DataType.VARCHAR, 256),
-        ("video_file_path", DataType.VARCHAR, 512),
+        ("segment_id", DataType.VARCHAR, 128),
+        ("video_file_name", DataType.VARCHAR, 64),
+        ("video_file_path", DataType.VARCHAR, 128),
         ("segment_start", DataType.FLOAT, None),
         ("segment_end", DataType.FLOAT, None),
         ("dataset_name", DataType.VARCHAR, 64),
-        ("camera_channel", DataType.VARCHAR, 64),
-        ("clip_id", DataType.VARCHAR, 128),
-        ("embedding_model", DataType.VARCHAR, 256),
+        ("clip_id", DataType.VARCHAR, 64),
+        ("embedding_model", DataType.VARCHAR, 128),
     ],
     "nuscenes": [
-        ("video_file_name", DataType.VARCHAR, 256),
-        ("video_file_path", DataType.VARCHAR, 512),
+        ("segment_id", DataType.VARCHAR, 128),
+        ("video_file_name", DataType.VARCHAR, 64),
+        ("video_file_path", DataType.VARCHAR, 128),
         ("segment_start", DataType.FLOAT, None),
         ("segment_end", DataType.FLOAT, None),
         ("dataset_name", DataType.VARCHAR, 64),
-        ("camera_channel", DataType.VARCHAR, 64),
         ("clip_id", DataType.VARCHAR, 128),
-        ("embedding_model", DataType.VARCHAR, 256),
-        ("scene_token", DataType.VARCHAR, 128),
+        ("embedding_model", DataType.VARCHAR, 128),
     ],
 }
 
 
 class MilvusVectorStore(VectorStoreBase):
-    def __init__(self, dataset_key: str) -> None:
-        if dataset_key not in _SCALAR_SCHEMA:
-            raise ValueError(f"Unknown dataset_key: {dataset_key}")
+    def __init__(self, dataset_name: str) -> None:
+        if dataset_name not in _SCALAR_SCHEMA:
+            raise ValueError(f"Unknown dataset_name: {dataset_name}")
 
-        self.dataset_key = dataset_key
-        self.collection_name = settings.milvus_collections[dataset_key]
+        self.dataset_name = dataset_name
+        self.collection_name = settings.milvus_collections[dataset_name]
         self.dim = settings.embedding_dim
         self.metric_type = settings.milvus_metric_type
-        self._scalars = _SCALAR_SCHEMA[dataset_key]
+        self._scalars = _SCALAR_SCHEMA[dataset_name]
         self._alias = settings.milvus_alias or "default"
         self._collection: Optional[Collection] = None
 
@@ -72,11 +72,18 @@ class MilvusVectorStore(VectorStoreBase):
     # ------------------------------------------------------------------ #
     def _build_schema(self) -> CollectionSchema:
         fields: List[FieldSchema] = []
+        
         for name, dtype, max_length in self._scalars:
-            if dtype == DataType.VARCHAR:
+            if dtype == DataType.VARCHAR and name != "segment_id":
                 fields.append(
                     FieldSchema(
                         name=name, dtype=dtype, max_length=max_length
+                    )
+                )
+            elif name == "segment_id":
+                fields.append(
+                    FieldSchema(
+                        name=name, dtype=dtype, max_length=max_length, is_primary=True, description="unique primary key for video segment"
                     )
                 )
             else:
@@ -90,7 +97,7 @@ class MilvusVectorStore(VectorStoreBase):
             )
         )
         return CollectionSchema(
-            fields, description=f"{self.dataset_key} clip embeddings"
+            fields, description=f"{self.dataset_name} clip embeddings"
         )
 
     def init(self) -> None:

@@ -8,10 +8,10 @@ import torch
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
 
-from src.config.settings import settings
-from src.encoders.base import VideoEncoderBase
-from src.encoders.keyframe_selector import select_keyframes
-from src.encoders.video_loader import read_video_frames_raw
+from config.settings import settings
+from encoders.base import VideoEncoderBase
+from encoders.keyframe_selector import select_keyframes
+from encoders.video_loader import read_video_frames_raw
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,13 @@ class KeyframeEncoder(VideoEncoderBase):
         self.max_keyframes = settings.keyframe_count
 
         logger.info(f"Loading CLIP KeyframeEncoder: {self.model_name} on {self.device}")
-        self.model: CLIPModel = CLIPModel.from_pretrained(self.model_name).to(self.device).eval()
-        self.processor: CLIPProcessor = CLIPProcessor.from_pretrained(self.model_name)
+        
+        local_model = Path("./models") / self.model_name.split('/')[-1]
+        if not local_model.exists():
+            logger.warning(f"Local model path {local_model} does not exist. Attempting to download from HuggingFace.")  
+            
+        self.model: CLIPModel = CLIPModel.from_pretrained(local_model, local_files_only=True).to(self.device).eval()
+        self.processor: CLIPProcessor = CLIPProcessor.from_pretrained(local_model, local_files_only=True)
         self._dim = self.model.config.projection_dim
 
     @property
@@ -43,10 +48,18 @@ class KeyframeEncoder(VideoEncoderBase):
 
     def _encode_single_image(self, image: Image.Image) -> np.ndarray:
         """Internal helper: encode one single image"""
+        if image.mode != "RGB":
+            image = image.convert("RGB")
         with torch.no_grad():
             inputs = self.processor(images=image, return_tensors="pt").to(self.device)
-            feat = self.model.get_image_features(**inputs)
+            output = self.model.get_image_features(**inputs)
+            
+            feat = output.pooler_output
             arr = feat.detach().cpu().numpy()[0]
+
+            norm = np.linalg.norm(arr, ord=2)
+            if norm > 1e-8:
+                arr = arr / norm
         return arr
 
     def _l2_normalize(self, vec: np.ndarray) -> np.ndarray:
@@ -58,25 +71,25 @@ class KeyframeEncoder(VideoEncoderBase):
     def encode(
         self,
         video_path: Optional[Union[str, Path]] = None,
-        start_sec: Optional[float] = None,
-        end_sec: Optional[float] = None,
+        start: Optional[float] = None,
+        end: Optional[float] = None,
         preloaded_frames: Optional[List[Image.Image]] = None,
     ) -> Optional[np.ndarray]:
         # use preloaded frames first to avoid repeated decoding
         if preloaded_frames is not None and len(preloaded_frames) > 0:
             raw_frames = preloaded_frames
         else:
-            if video_path is None or start_sec is None or end_sec is None:
+            if video_path is None or start is None or end is None:
                 logger.error("Missing video path or time bounds for frame reading")
                 return None
             raw_frames = read_video_frames_raw(
                 video_path=video_path,
-                start=start_sec,
-                end=end_sec,
+                start=start,
+                end=end,
                 sample_rate=settings.frame_sampling_rate
             )
             if not raw_frames:
-                logger.warning(f"No frames decoded: {video_path} [{start_sec}, {end_sec}]")
+                logger.warning(f"No frames decoded: {video_path} [{start}, {end}]")
                 return None
 
         # run keyframe selection

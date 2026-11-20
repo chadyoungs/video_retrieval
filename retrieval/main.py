@@ -27,7 +27,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from app.retrieval.service import RetrievalService
+from retrieval.service import RetrievalService
 
 
 def _parse_json(value: Optional[str]) -> Dict[str, Any]:

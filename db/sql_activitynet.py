@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from src.db.models import ActivityNetSegmentRow
-from src.db.pg_store import PostgresRelationalStore
+from db.models import ActivityNetSegmentRow
+from db.pg_store import PostgresRelationalStore
 
 
 class ActivityNetRelationalStore(PostgresRelationalStore):
@@ -13,7 +13,8 @@ class ActivityNetRelationalStore(PostgresRelationalStore):
     annotation_fields: Tuple[str, ...] = (
         "scene_env",
         "scene_type",
-        "weather",
+        "people_count",
         "lighting",
         "time_of_day",
+        "semantic_summary",
     )

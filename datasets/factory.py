@@ -4,21 +4,21 @@ from __future__ import annotations
 
 from typing import Literal
 
-from src.config.settings import settings
-from src.datasets.activitynet import ActivityNetAdapter
-from src.datasets.base import DatasetAdapterBase
-from src.datasets.nuscenes import NuScenesAdapter
+from config.settings import settings
+from datasets.activitynet import ActivityNetAdapter
+from datasets.base import DatasetAdapterBase
+from datasets.nuscenes import NuScenesAdapter
 
-DatasetKey = Literal["activitynet", "nuscenes"]
+DatasetName = Literal["activitynet", "nuscenes"]
 
 
-def get_dataset_adapter(dataset_key: DatasetKey) -> DatasetAdapterBase:
-    """Return the adapter for ``dataset_key``; default to settings.source."""
-    if dataset_key == "activitynet":
+def get_dataset_adapter(dataset_name: DatasetName) -> DatasetAdapterBase:
+    """Return the adapter for ``dataset_name``; default to settings.source."""
+    if dataset_name == "activitynet":
         return ActivityNetAdapter()
-    if dataset_key == "nuscenes":
+    if dataset_name == "nuscenes":
         return NuScenesAdapter()
-    raise ValueError(f"Unsupported dataset_key: {dataset_key!r}")
+    raise ValueError(f"Unsupported dataset_name: {dataset_name!r}")
 
 
 def get_default_adapter() -> DatasetAdapterBase:

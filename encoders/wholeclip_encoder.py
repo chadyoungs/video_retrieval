@@ -14,13 +14,13 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor
 
-from src.config.settings import settings
-from src.encoders.base import BaseEncoder
+from config.settings import settings
+from encoders.base import VideoEncoderBase
 
 logger = logging.getLogger(__name__)
 
 
-class CLIP4ClipVideoEncoder(BaseEncoder):
+class CLIP4ClipVideoEncoder(VideoEncoderBase):
     def __init__(self):
         self.device = torch.device(settings.device if torch.cuda.is_available() else "cpu")
         self.cache_root = Path(settings.model_cache_dir) / "clip4clip"

@@ -21,8 +21,8 @@ class VideoEncoderBase(ABC):
     def encode(
         self,
         video_path: Optional[Union[str, Path]] = None,
-        start_sec: Optional[float] = None,
-        end_sec: Optional[float] = None,
+        start: Optional[float] = None,
+        end: Optional[float] = None,
         preloaded_frames: Optional[List[Image.Image]] = None,
     ) -> Optional[np.ndarray]:
         """

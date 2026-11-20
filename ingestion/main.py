@@ -1,7 +1,7 @@
 import argparse
 import logging
 
-from src.ingestion.pipeline import IngestionPipeline
+from ingestion.pipeline import IngestionPipeline
 
 logging.basicConfig(
     level=logging.INFO,
