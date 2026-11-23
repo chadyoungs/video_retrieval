@@ -1,62 +1,66 @@
+"""Model weight downloader kept in sync with ``utils.hf_models``.
+
+Weights are stored as ``<model_cache_dir>/<repo basename>`` so encoders and
+rerankers find them by the same path. Local-only mode still works offline.
+
+Examples
+--------
+    python -m models_download.download --preset clip
+    python -m models_download.download --repo-id BAAI/bge-reranker-base
 """
-Model weight downloader.
-Support preset: clip / siglip
-Read config from settings, skip if local folder already exists, support --force
-"""
+
 from __future__ import annotations
+
 import argparse
 import os
 from pathlib import Path
+
 from transformers import AutoModel, AutoProcessor
 
-from src.config.settings import settings
+from config.settings import settings
+from utils.hf_models import cache_root, local_model_dir
 
-# preset map: preset name -> hf repo id
 PRESET_MAP = {
     "clip": "openai/clip-vit-base-patch32",
     "siglip": "google/siglip-so400m-patch14-384",
+    "bge-reranker": "BAAI/bge-reranker-base",
 }
 
 
-def download_model(preset: str, force: bool = False) -> Path:
-    if preset not in PRESET_MAP:
-        raise ValueError(f"preset [{preset}] not supported, available: {list(PRESET_MAP.keys())}")
+def download_model(repo_id: str, force: bool = False) -> Path:
+    save_dir = local_model_dir(repo_id)
+    cache_root().mkdir(parents=True, exist_ok=True)
 
-    repo_id = PRESET_MAP[preset]
-    cache_root = Path(settings.model_cache_dir)
-    save_dir = cache_root / preset
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    # set hf mirror
     if settings.hf_endpoint:
         os.environ["HF_ENDPOINT"] = settings.hf_endpoint
 
     if save_dir.exists() and any(save_dir.iterdir()) and not force:
-        print(f"✅ Model {preset} already exists at {save_dir}, skip download.")
+        print(f"already present: {save_dir}")
         return save_dir
 
-    print(f"🔽 Start downloading {preset} from {repo_id} ...")
+    print(f"downloading {repo_id} -> {save_dir}")
     model = AutoModel.from_pretrained(repo_id)
-    processor = AutoProcessor.from_pretrained(repo_id)
-
     model.save_pretrained(save_dir)
-    processor.save_pretrained(save_dir)
-    print(f"✅ Saved to {save_dir}")
+    try:
+        processor = AutoProcessor.from_pretrained(repo_id)
+        processor.save_pretrained(save_dir)
+    except Exception:  # noqa: BLE001 - rerankers only need a tokenizer
+        from transformers import AutoTokenizer
+
+        AutoTokenizer.from_pretrained(repo_id).save_pretrained(save_dir)
+    print(f"saved: {save_dir}")
     return save_dir
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Download model weights")
-    parser.add_argument(
-        "--preset",
-        type=str,
-        default="clip",
-        choices=list(PRESET_MAP.keys()),
-        help="model preset, default clip"
-    )
-    parser.add_argument("--force", action="store_true", help="force re-download even if exists")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Download model weights into the local cache")
+    parser.add_argument("--preset", choices=sorted(PRESET_MAP), default="clip")
+    parser.add_argument("--repo-id", default=None, help="Any HF repo id; overrides --preset")
+    parser.add_argument("--force", action="store_true", help="Re-download even if present")
     args = parser.parse_args()
-    download_model(args.preset, args.force)
+
+    repo_id = args.repo_id or PRESET_MAP[args.preset]
+    download_model(repo_id, args.force)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ DatasetName = Literal["activitynet", "nuscenes"]
 
 
 def get_dataset_adapter(dataset_name: DatasetName) -> DatasetAdapterBase:
-    """Return the adapter for ``dataset_name``; default to settings.source."""
+    """Return the adapter for ``dataset_name``."""
     if dataset_name == "activitynet":
         return ActivityNetAdapter()
     if dataset_name == "nuscenes":

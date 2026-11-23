@@ -1,16 +1,22 @@
 """Hybrid retrieval service: vector recall + metadata ranking + reranking.
 
-The service digests the legacy ``retrieval`` module:
+Query paths
+-----------
+* text  -> CLIP/SigLIP text branch;
+* image -> CLIP/SigLIP image branch;
+* video -> pooled keyframe embedding of the query clip, same path as ingestion.
 
-* text query    -> CLIP text branch embedding;
-* image query   -> CLIP image branch embedding;
-* video query   -> pooled keyframe / sampled-frame embedding of the query clip;
-* hybrid recall -> Milvus ANN candidates fused with PostgreSQL metadata /
-  annotation ranking on a shared segment key;
-* reranking     -> integrated rule gate + cross-encoder + VLM fused reranker.
+Recall
+------
+Milvus ANN gives dense candidates; PostgreSQL contributes candidates that
+satisfy the requested metadata / annotation conditions and scores them. The two
+sides are fused per *segment* and the fusion is followed by:
+1. annotation back-fill for vector-only candidates (so reranking always sees
+   annotation text);
+2. a hard metadata filter that covers fields Milvus does not store.
 
-One service instance is bound to one dataset, so its relational store and
-vector collection stay dataset-isolated.
+The service instance is bound to one dataset, so its table and collection stay
+dataset-isolated.
 """
 
 from __future__ import annotations
@@ -18,22 +24,35 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
-import cv2
+import numpy as np
 
 from config.settings import settings
 from db.relational_base import RelationalStoreBase
 from db.store_factory import get_relational_store, get_vector_store
 from db.vector_base import VectorStoreBase
 from encoders.base import VideoEncoderBase
-from encoders.factory import get_encoder, get_text_encoder
-from encoders.text_encoder import TextEncoder
-from encoders.video_loader import read_video_frames_raw
+from encoders.factory import get_default_encoder, get_text_encoder
 from rerankers.base import BaseReranker, RetrievalItem
 from rerankers.factory import get_reranker
 
-logger = logging.getLogger("app.retrieval")
+if TYPE_CHECKING:  # pragma: no cover - typing only, keeps torch optional here
+    from encoders.text_encoder import TextEncoder
+
+logger = logging.getLogger("retrieval.service")
+
+#: Columns carried over from a PostgreSQL row that are not "metadata" payload.
+_SQL_BOOKKEEPING = {"score", "id", "created_at", "processing_ts", "annotation_model"}
+#: Identity / timing fields already promoted to the record itself.
+_IDENTITY_FIELDS = {
+    "segment_id",
+    "clip_id",
+    "video_file_name",
+    "video_file_path",
+    "segment_start",
+    "segment_end",
+}
 
 
 class RetrievalService:
@@ -46,25 +65,34 @@ class RetrievalService:
         vector_store: Optional[VectorStoreBase] = None,
         reranker: Optional[BaseReranker] = None,
         encoder: Optional[VideoEncoderBase] = None,
-        text_encoder: Optional[TextEncoder] = None,
-        weight_vector: float = 0.7,
-        weight_metadata: float = 0.3,
-        pool_multiplier: int = 2,
+        text_encoder: Optional["TextEncoder"] = None,
+        weight_vector: Optional[float] = None,
+        weight_metadata: Optional[float] = None,
+        pool_multiplier: Optional[int] = None,
     ) -> None:
         self.dataset_key = dataset_key or settings.dataset_source
-        self.relational_store = (
-            relational_store or get_relational_store(self.dataset_key)
-        )
+        if self.dataset_key not in ("activitynet", "nuscenes"):
+            raise ValueError(f"Unknown dataset_key: {self.dataset_key!r}")
+
+        self.relational_store = relational_store or get_relational_store(self.dataset_key)
         self.vector_store = vector_store or get_vector_store(self.dataset_key)
         self.reranker = reranker or get_reranker(self.dataset_key)
-        self.encoder = encoder or get_encoder()
+        self.encoder = encoder or get_default_encoder()
         self.text_encoder = text_encoder or get_text_encoder()
 
-        self.weight_vector = weight_vector
-        self.weight_metadata = weight_metadata
-        # Recall pool = max(limit, reranker_candidates) * multiplier. A wider
-        # pool before reranking improves rerank precision at modest recall cost.
-        self.pool_multiplier = pool_multiplier
+        self.weight_vector = settings.weight_vector if weight_vector is None else weight_vector
+        self.weight_metadata = (
+            settings.weight_metadata if weight_metadata is None else weight_metadata
+        )
+        self.pool_multiplier = pool_multiplier or settings.recall_pool_multiplier
+
+        logger.info(
+            "Retrieval service ready for dataset=%s (dim=%s, weights=%.2f/%.2f)",
+            self.dataset_key,
+            getattr(self.encoder, "dim", "?"),
+            self.weight_vector,
+            self.weight_metadata,
+        )
 
     # ------------------------------------------------------------------ #
     # Public query entries
@@ -77,7 +105,6 @@ class RetrievalService:
         limit: int = 5,
         rerank: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Retrieve segments matching a natural-language query."""
         if not query_text or not query_text.strip():
             logger.warning("Empty text query; returning empty results")
             return []
@@ -86,7 +113,6 @@ class RetrievalService:
         return self.hybrid_search(
             query_embedding=embedding,
             query_text=query_text,
-            query_image_path=None,
             annotation_conditions=annotation_conditions,
             metadata_filters=metadata_filters,
             limit=limit,
@@ -101,15 +127,18 @@ class RetrievalService:
         limit: int = 5,
         rerank: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Retrieve segments visually matching a reference image."""
         if not os.path.exists(query_image_path):
             logger.warning("Query image not found: %s", query_image_path)
             return []
 
-        embedding = self.encoder.encode_image(query_image_path)
+        try:
+            embedding = self.encoder.encode_image(query_image_path)
+        except NotImplementedError:
+            logger.error("%s cannot encode images", type(self.encoder).__name__)
+            return []
+
         return self.hybrid_search(
             query_embedding=embedding,
-            query_text="",
             query_image_path=query_image_path,
             annotation_conditions=annotation_conditions,
             metadata_filters=metadata_filters,
@@ -127,39 +156,35 @@ class RetrievalService:
         limit: int = 5,
         rerank: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Retrieve segments matching a query video clip.
-
-        The whole clip (or ``[start_sec, end_sec)``) is embedded with the same
-        frame-pooling path used at ingestion. A middle frame is exported for
-        the VLM reranker's reference-image branch.
-        """
+        """Embed the query clip with the ingestion path; a middle frame feeds the VLM."""
         if not os.path.exists(query_video_path):
             logger.warning("Query video not found: %s", query_video_path)
             return []
 
-        embedding, frames = self._encode_video_query(
-            query_video_path, start_sec, end_sec
-        )
+        embedding, frames = self._encode_video_query(query_video_path, start_sec, end_sec)
         if embedding is None:
-            logger.warning(
-                "Query video embedding unavailable: %s", query_video_path
-            )
+            logger.warning("Query video embedding unavailable: %s", query_video_path)
             return []
 
         query_image_path: Optional[str] = None
         if frames:
-            middle = frames[len(frames) // 2]
-            query_image_path = self._save_frame(middle)
+            query_image_path = self._save_frame(frames[len(frames) // 2])
 
-        return self.hybrid_search(
-            query_embedding=embedding,
-            query_text="",
-            query_image_path=query_image_path,
-            annotation_conditions=annotation_conditions,
-            metadata_filters=metadata_filters,
-            limit=limit,
-            rerank=rerank,
-        )
+        try:
+            return self.hybrid_search(
+                query_embedding=embedding,
+                annotation_conditions=annotation_conditions,
+                metadata_filters=metadata_filters,
+                limit=limit,
+                rerank=rerank,
+                query_image_path=query_image_path,
+            )
+        finally:
+            if query_image_path and os.path.exists(query_image_path):
+                try:
+                    os.unlink(query_image_path)
+                except OSError:
+                    logger.debug("Could not remove temp frame %s", query_image_path)
 
     # ------------------------------------------------------------------ #
     # Hybrid recall + fusion
@@ -174,15 +199,16 @@ class RetrievalService:
         limit: int = 5,
         rerank: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Run vector + metadata recall, fuse, then optionally rerank."""
         if query_embedding is None:
             return []
+        if not self._check_dim(query_embedding):
+            return []
 
-        pool_size = max(limit, settings.reranker_candidates) * self.pool_multiplier
+        pool_size = max(limit, settings.reranker_top_k) * self.pool_multiplier
 
         vec_hits = self.vector_store.search_vectors(
             query_embedding,
-            limit=pool_size,
+            top_k=pool_size,
             metadata_filters=metadata_filters,
         )
         sql_hits = self.relational_store.search_metadata(
@@ -192,13 +218,23 @@ class RetrievalService:
         )
 
         merged = self._merge(vec_hits, sql_hits)
+        self._backfill_annotations(merged)
+
+        if metadata_filters:
+            merged = {
+                key: record
+                for key, record in merged.items()
+                if self._passes_filters(record, metadata_filters)
+            }
+
         ordered = sorted(
             merged.values(),
-            key=lambda record: (-record["final_score"], record["clip_id"]),
+            key=lambda record: (-record["final_score"], record["segment_id"]),
         )[:pool_size]
 
         if not rerank:
-            return self._to_output(ordered, reranked_items=None)
+            logger.info("Hybrid recall returned %d segments (no rerank)", len(ordered))
+            return self._to_output(ordered, reranked_items=None, limit=limit)
 
         candidates = [self._to_retrieval_item(record) for record in ordered]
         reranked = self.reranker.rerank(
@@ -208,7 +244,22 @@ class RetrievalService:
             metadata_filters=metadata_filters,
             query_image_path=query_image_path,
         )
+        logger.info("Rerank returned %d of %d candidates", len(reranked), len(candidates))
         return self._to_output(ordered, reranked)
+
+    def _check_dim(self, embedding: Any) -> bool:
+        expected = getattr(self.vector_store, "dim", None)
+        actual = int(np.asarray(embedding).reshape(-1).shape[0])
+        if expected and actual != expected:
+            logger.error(
+                "Query embedding dim %d does not match the index dim %d "
+                "(model tier=%s). Re-ingest or fix semantic_model_tier.",
+                actual,
+                expected,
+                settings.semantic_model_tier,
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Fusion helpers
@@ -218,11 +269,10 @@ class RetrievalService:
         vec_hits: List[Dict[str, Any]],
         sql_hits: List[Dict[str, Any]],
     ) -> Dict[str, Dict[str, Any]]:
-        """Fuse vector and SQL hits on the shared segment key.
+        """Fuse both recall sides on ``segment_id``.
 
-        A candidate missing from one side keeps that side's score at 0; it is
-        not treated as a perfect match. Scores on both sides are already in
-        [0, 1], so the linear weighted fusion stays calibrated.
+        A candidate missing from one side keeps that side's score at 0. Both
+        scores are already in [0, 1], so the linear fusion stays calibrated.
         """
         merged: Dict[str, Dict[str, Any]] = {}
 
@@ -239,10 +289,7 @@ class RetrievalService:
             record["final_score"] = self.weight_vector * record["vec_score"]
             merged[key] = record
 
-        ann_fields = set(
-            getattr(self.relational_store, "annotation_fields", ())
-        )
-        skip_sql_columns = {"score", "id", "created_at"}
+        ann_fields = set(getattr(self.relational_store, "annotation_fields", ()))
 
         for hit in sql_hits:
             key = self._segment_key(hit)
@@ -250,14 +297,12 @@ class RetrievalService:
                 continue
 
             annotation = {
-                field: hit.get(field)
-                for field in ann_fields
-                if hit.get(field) is not None
+                field: hit.get(field) for field in ann_fields if hit.get(field) is not None
             }
             metadata = {
-                k: v
-                for k, v in hit.items()
-                if k not in ann_fields and k not in skip_sql_columns
+                key_name: value
+                for key_name, value in hit.items()
+                if key_name not in ann_fields and key_name not in _SQL_BOOKKEEPING
             }
             sql_score = float(hit.get("score") or 0.0)
 
@@ -281,8 +326,68 @@ class RetrievalService:
 
         return merged
 
+    def _backfill_annotations(self, merged: Dict[str, Dict[str, Any]]) -> None:
+        """Add annotation columns for candidates that only came from Milvus."""
+        missing = [
+            record["segment_id"]
+            for record in merged.values()
+            if record["segment_id"] and not record["annotation"]
+        ]
+        if not missing:
+            return
+
+        try:
+            rows = self.relational_store.get_segments_by_ids(missing)
+        except Exception:  # noqa: BLE001 - recall must not fail on enrichment
+            logger.exception("Annotation back-fill failed for %d segments", len(missing))
+            return
+
+        ann_fields = set(getattr(self.relational_store, "annotation_fields", ()))
+        by_id = {row.get("segment_id"): row for row in rows}
+        filled = 0
+        for segment_id in missing:
+            row = by_id.get(segment_id)
+            if not row:
+                logger.debug("Segment %s not found in the relational store", segment_id)
+                continue
+            record = merged.get(self._segment_key(row))
+            if record is None:
+                continue
+            record["annotation"] = {
+                field: row.get(field) for field in ann_fields if row.get(field) is not None
+            }
+            for key_name, value in row.items():
+                if (
+                    key_name in ann_fields
+                    or key_name in _SQL_BOOKKEEPING
+                    or key_name in _IDENTITY_FIELDS
+                ):
+                    continue
+                record["metadata"].setdefault(key_name, value)
+            filled += 1
+
+        logger.debug("Back-filled annotations for %d/%d segments", filled, len(missing))
+
+    @classmethod
+    def _passes_filters(cls, record: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        for key, expected in filters.items():
+            actual = record.get(key, record["metadata"].get(key, record["annotation"].get(key)))
+            if actual is None:
+                # Not stored for this dataset or segment: cannot evaluate.
+                continue
+            if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+                if float(actual) != float(expected):
+                    return False
+            elif str(actual).strip().lower() != str(expected).strip().lower():
+                return False
+        return True
+
     @staticmethod
     def _segment_key(hit: Dict[str, Any]) -> str:
+        """Segment identity: ``segment_id`` when present, else a composite key."""
+        segment_id = hit.get("segment_id")
+        if segment_id:
+            return str(segment_id)
         clip_id = hit.get("clip_id")
         start = hit.get("segment_start")
         end = hit.get("segment_end")
@@ -292,8 +397,10 @@ class RetrievalService:
 
     @staticmethod
     def _base_record(hit: Dict[str, Any]) -> Dict[str, Any]:
+        clip_id = hit.get("clip_id") or hit.get("video_file_name")
         return {
-            "clip_id": str(hit.get("clip_id") or hit.get("video_file_name") or ""),
+            "segment_id": str(hit.get("segment_id") or ""),
+            "clip_id": str(clip_id or ""),
             "video_file_name": hit.get("video_file_name"),
             "video_file_path": hit.get("video_file_path"),
             "segment_start": hit.get("segment_start"),
@@ -304,17 +411,8 @@ class RetrievalService:
 
     @staticmethod
     def _vec_metadata(hit: Dict[str, Any]) -> Dict[str, Any]:
-        skip = {
-            "score",
-            "distance",
-            "clip_vector",
-            "video_file_name",
-            "video_file_path",
-            "segment_start",
-            "segment_end",
-            "clip_id",
-        }
-        return {k: v for k, v in hit.items() if k not in skip}
+        skip = {"score", "distance", "clip_vector"} | _IDENTITY_FIELDS
+        return {key: value for key, value in hit.items() if key not in skip}
 
     # ------------------------------------------------------------------ #
     # Query video encoding
@@ -326,12 +424,13 @@ class RetrievalService:
         end_sec: Optional[float],
     ) -> Tuple[Optional[List[float]], Optional[List[Any]]]:
         duration = self._video_duration(video_path)
-        if duration <= 0:
-            start = start_sec or 0.0
-            end = end_sec or 0.0
-        else:
-            start = start_sec or 0.0
-            end = end_sec if end_sec is not None else duration
+        start = start_sec or 0.0
+        end = end_sec if end_sec is not None else (duration or start + settings.clip_duration_sec)
+        if end <= start:
+            logger.warning("Invalid query video bounds [%s, %s]", start, end)
+            return None, None
+
+        from encoders.video_loader import read_video_frames_raw
 
         frames = read_video_frames_raw(
             video_path, start, end, settings.frame_sampling_rate
@@ -341,14 +440,16 @@ class RetrievalService:
 
         embedding = self.encoder.encode(
             video_path=video_path,
-            start_sec=start,
-            end_sec=end,
+            start=start,
+            end=end,
             preloaded_frames=frames,
         )
         return embedding, frames
 
     @staticmethod
     def _video_duration(video_path: str) -> float:
+        import cv2
+
         cap = cv2.VideoCapture(video_path)
         try:
             fps = cap.get(cv2.CAP_PROP_FPS)
@@ -361,9 +462,12 @@ class RetrievalService:
 
     @staticmethod
     def _save_frame(frame: Any) -> str:
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        cv2.imwrite(tmp.name, frame)
-        return tmp.name
+        import cv2
+
+        handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        handle.close()
+        cv2.imwrite(handle.name, frame)
+        return handle.name
 
     # ------------------------------------------------------------------ #
     # Output assembly
@@ -371,6 +475,7 @@ class RetrievalService:
     @staticmethod
     def _to_retrieval_item(record: Dict[str, Any]) -> RetrievalItem:
         return RetrievalItem(
+            segment_id=record["segment_id"],
             clip_id=record["clip_id"],
             video_file_path=record.get("video_file_path") or "",
             video_file_name=record.get("video_file_name"),
@@ -386,47 +491,80 @@ class RetrievalService:
         self,
         ordered: List[Dict[str, Any]],
         reranked_items: Optional[List[Any]],
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         if reranked_items is None:
             output: List[Dict[str, Any]] = []
-            for idx, record in enumerate(ordered):
-                row = dict(record)
-                row["rank"] = idx + 1
-                row["rerank_score"] = record["final_score"]
-                row["rerank_reason"] = "coarse hybrid order"
-                output.append(row)
+            for idx, record in enumerate(ordered[: limit or len(ordered)], start=1):
+                output.append(
+                    {
+                        "rank": idx,
+                        **self._record_payload(record),
+                        "vec_score": record.get("vec_score", 0.0),
+                        "sql_score": record.get("sql_score", 0.0),
+                        "coarse_score": record.get("final_score", 0.0),
+                        "final_score": record.get("final_score", 0.0),
+                        "rerank_score": record.get("final_score", 0.0),
+                        "rerank_reason": "coarse hybrid order",
+                    }
+                )
             return output
 
-        by_clip = {record["clip_id"]: record for record in ordered}
+        # Reranked items are keyed by segment_id: one clip has many segments and
+        # a clip_id-keyed map would leak the wrong scores into every rank.
+        by_segment = {record["segment_id"]: record for record in ordered}
         output = []
         for item in reranked_items:
-            record = by_clip.get(item.clip_id, {})
-            output.append(
+            record = by_segment.get(item.segment_id, {})
+            payload = self._record_payload(record)
+            payload.update(
                 {
-                    "rank": item.rank,
+                    "segment_id": item.segment_id,
                     "clip_id": item.clip_id,
-                    "video_file_name": item.video_file_name,
-                    "video_file_path": item.video_file_path,
+                    "video_file_name": item.video_file_name or payload["video_file_name"],
+                    "video_file_path": item.video_file_path or payload["video_file_path"],
                     "video_full_path": self._full_path(
                         item.video_file_path, item.video_file_name
                     ),
                     "segment_start": item.segment_start,
                     "segment_end": item.segment_end,
-                    "dataset_name": item.metadata.get("dataset_name"),
-                    "camera_channel": item.metadata.get("camera_channel"),
                     "annotation": item.annotation,
                     "metadata": item.metadata,
+                }
+            )
+            payload.update(
+                {
+                    "rank": item.rank,
                     "vec_score": record.get("vec_score", 0.0),
                     "sql_score": record.get("sql_score", 0.0),
                     "coarse_score": item.coarse_score,
-                    "final_score": record.get(
-                        "final_score", item.coarse_score
-                    ),
+                    "final_score": record.get("final_score", item.coarse_score),
                     "rerank_score": item.rerank_score,
                     "rerank_reason": item.rerank_reason,
+                    "score_rule": item.score_rule,
+                    "score_cross_encoder": item.score_cross_encoder,
+                    "score_vlm": item.score_vlm,
                 }
             )
+            output.append(payload)
         return output
+
+    def _record_payload(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "segment_id": record.get("segment_id"),
+            "clip_id": record.get("clip_id"),
+            "video_file_name": record.get("video_file_name"),
+            "video_file_path": record.get("video_file_path"),
+            "video_full_path": self._full_path(
+                record.get("video_file_path"), record.get("video_file_name")
+            ),
+            "segment_start": record.get("segment_start"),
+            "segment_end": record.get("segment_end"),
+            "dataset_name": record.get("dataset_name"),
+            "camera_channel": record.get("camera_channel"),
+            "annotation": record.get("annotation") or {},
+            "metadata": record.get("metadata") or {},
+        }
 
     @staticmethod
     def _full_path(directory: Optional[str], name: Optional[str]) -> str:

@@ -1,72 +1,89 @@
+"""CLIP / SigLIP keyframe encoder.
+
+Pipeline: read frames -> select keyframes -> embed each keyframe -> mean-pool
+-> L2-normalise. Image queries reuse the same single-image path, so query and
+index embeddings live in one space.
+"""
+
 from __future__ import annotations
+
 import logging
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import numpy as np
 import torch
 from PIL import Image
-from transformers import CLIPModel, CLIPProcessor
+from transformers import AutoModel, AutoProcessor
 
 from config.settings import settings
 from encoders.base import VideoEncoderBase
 from encoders.keyframe_selector import select_keyframes
 from encoders.video_loader import read_video_frames_raw
+from utils.device import resolve_device
+from utils.hf_models import load_model, load_processor
 
 logger = logging.getLogger(__name__)
 
 
-class KeyframeEncoder(VideoEncoderBase):
-    """
-    Pipeline:
-    1. Read frames (or reuse preloaded_frames)
-    2. Select keyframes by keyframe selector
-    3. Encode each keyframe image embedding
-    4. Mean pooling over keyframe embeddings
-    5. L2 normalize final aggregated vector
-    """
-    def __init__(
-        self
-    ):
-        self.model_name = settings.clip_model_name
-        self.device = settings.device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.max_keyframes = settings.keyframe_count
+def _features_to_array(features: Any) -> np.ndarray:
+    """Accept either a tensor or a model-output object carrying ``pooler_output``."""
+    if isinstance(features, torch.Tensor):
+        return features.detach().cpu().numpy()
+    pooled = getattr(features, "pooler_output", None)
+    if pooled is not None:
+        return pooled.detach().cpu().numpy()
+    raise TypeError(f"Unsupported feature output type: {type(features)!r}")
 
-        logger.info(f"Loading CLIP KeyframeEncoder: {self.model_name} on {self.device}")
-        
-        local_model = Path("./models") / self.model_name.split('/')[-1]
-        if not local_model.exists():
-            logger.warning(f"Local model path {local_model} does not exist. Attempting to download from HuggingFace.")  
-            
-        self.model: CLIPModel = CLIPModel.from_pretrained(local_model, local_files_only=True).to(self.device).eval()
-        self.processor: CLIPProcessor = CLIPProcessor.from_pretrained(local_model, local_files_only=True)
-        self._dim = self.model.config.projection_dim
+
+class KeyframeEncoder(VideoEncoderBase):
+    def __init__(self) -> None:
+        self.model_name = settings.clip_model_name
+        self.device = resolve_device()
+
+        logger.info("Loading keyframe encoder %s on %s", self.model_name, self.device)
+        self.model = load_model(self.model_name, AutoModel)
+        self.processor = load_processor(self.model_name, AutoProcessor)
+        self.model.to(self.device).eval()
+
+        self.max_keyframes = settings.keyframe_count
+        self._dim = self._resolve_dim()
+
+    def _resolve_dim(self) -> int:
+        config = self.model.config
+        projection = getattr(config, "projection_dim", None)
+        if projection:
+            return int(projection)
+        text_config = getattr(config, "text_config", None)
+        hidden = getattr(text_config, "hidden_size", None) if text_config else None
+        if hidden:
+            return int(hidden)
+        logger.warning(
+            "Could not infer embedding dim from %s config; using settings value %d",
+            self.model_name,
+            settings.embedding_dim,
+        )
+        return settings.embedding_dim
 
     @property
     def dim(self) -> int:
         return self._dim
 
-    def _encode_single_image(self, image: Image.Image) -> np.ndarray:
-        """Internal helper: encode one single image"""
-        if image.mode != "RGB":
-            image = image.convert("RGB")
-        with torch.no_grad():
-            inputs = self.processor(images=image, return_tensors="pt").to(self.device)
-            output = self.model.get_image_features(**inputs)
-            
-            feat = output.pooler_output
-            arr = feat.detach().cpu().numpy()[0]
-
-            norm = np.linalg.norm(arr, ord=2)
-            if norm > 1e-8:
-                arr = arr / norm
-        return arr
-
-    def _l2_normalize(self, vec: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _l2_normalize(vec: np.ndarray) -> np.ndarray:
         norm = np.linalg.norm(vec, ord=2)
         if norm < 1e-8:
             return vec
         return vec / norm
+
+    def _encode_single_image(self, image: Image.Image) -> np.ndarray:
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        with torch.no_grad():
+            inputs = self.processor(images=image, return_tensors="pt").to(self.device)
+            features = self.model.get_image_features(**inputs)
+            arr = _features_to_array(features)[0]
+        return self._l2_normalize(arr)
 
     def encode(
         self,
@@ -75,9 +92,9 @@ class KeyframeEncoder(VideoEncoderBase):
         end: Optional[float] = None,
         preloaded_frames: Optional[List[Image.Image]] = None,
     ) -> Optional[np.ndarray]:
-        # use preloaded frames first to avoid repeated decoding
-        if preloaded_frames is not None and len(preloaded_frames) > 0:
-            raw_frames = preloaded_frames
+        # Reuse frames decoded by annotation to avoid a second video pass.
+        if preloaded_frames:
+            raw_frames = list(preloaded_frames)
         else:
             if video_path is None or start is None or end is None:
                 logger.error("Missing video path or time bounds for frame reading")
@@ -86,29 +103,26 @@ class KeyframeEncoder(VideoEncoderBase):
                 video_path=video_path,
                 start=start,
                 end=end,
-                sample_rate=settings.frame_sampling_rate
+                sample_rate=settings.frame_sampling_rate,
             )
             if not raw_frames:
-                logger.warning(f"No frames decoded: {video_path} [{start}, {end}]")
+                logger.warning("No frames decoded: %s [%s, %s]", video_path, start, end)
                 return None
 
-        # run keyframe selection
         key_frames = select_keyframes(raw_frames, max_k=self.max_keyframes)
         if not key_frames:
             logger.warning("Keyframe selector returned empty set")
             return None
 
-        # encode every keyframe
-        frame_embeds = []
-        for img in key_frames:
-            emb = self._encode_single_image(img)
-            frame_embeds.append(emb)
-        frame_stack = np.stack(frame_embeds, axis=0)
+        frame_stack = np.stack(
+            [self._encode_single_image(img) for img in key_frames], axis=0
+        )
+        return self._l2_normalize(np.mean(frame_stack, axis=0))
 
-        # mean pooling across keyframes
-        pooled = np.mean(frame_stack, axis=0)
-        final_emb = self._l2_normalize(pooled)
-        return final_emb
+    def encode_image(self, image_path: Union[str, Path]) -> np.ndarray:
+        with Image.open(image_path) as image:
+            return self._encode_single_image(image)
 
+    # Legacy alias kept for callers from the old retrieval module.
     def encode_image_query(self, image: Image.Image) -> np.ndarray:
-        return self._l2_normalize(self._encode_single_image(image))
+        return self._encode_single_image(image)

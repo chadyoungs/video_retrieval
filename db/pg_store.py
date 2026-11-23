@@ -1,8 +1,8 @@
 """Generic PostgreSQL store.
 
-Subclasses only bind ``row_model`` and ``annotation_fields``. The shared base
-handles connection, batch insert, metadata ranking and record mapping. Only
-columns that exist on this dataset's own table are written.
+Subclasses bind ``row_model`` and ``annotation_fields``. This base owns the
+connection, batch insert, metadata ranking and the segment lookup used to
+back-fill annotations for vector-only candidates.
 """
 
 from __future__ import annotations
@@ -10,18 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import (
-    and_,
-    case,
-    create_engine,
-    desc,
-    literal,
-    or_,
-    select,
-    table,
-    text,
-    func,
-)
+from sqlalchemy import and_, case, create_engine, desc, literal, or_, select, text
 from sqlalchemy.orm import sessionmaker
 
 from config.settings import settings
@@ -30,15 +19,8 @@ from db.relational_base import RelationalStoreBase
 
 logger = logging.getLogger(__name__)
 
-
-# Metadata filter fields shared by both datasets. Fields missing on a
-# dataset's own table are ignored at search time.
-METADATA_FILTER_FIELDS: Tuple[str, ...] = (
-    "dataset_name",
-    "dataset_version",
-    "dataset_split",
-    "clip_id",
-)
+#: Columns never used as a filter (surrogate key / bookkeeping).
+FILTER_DENYLIST: Tuple[str, ...] = ("id", "processing_ts", "created_at")
 
 
 class PostgresRelationalStore(RelationalStoreBase):
@@ -57,23 +39,18 @@ class PostgresRelationalStore(RelationalStoreBase):
     # Schema
     # ------------------------------------------------------------------ #
     def init(self) -> None:
-        # create_all / drop_all are SQLAlchemy MetaData methods; ``tables=[...]``
-        # limits the operation to this store's own table only.
-        Base.metadata.create_all(
-            self.engine, tables=[self.row_model.__table__]
-        )
+        Base.metadata.create_all(self.engine, tables=[self.row_model.__table__])
         logger.info("Table '%s' ready", self.row_model.__table__.name)
 
     def drop(self) -> None:
         table = self.row_model.__table__
         Base.metadata.drop_all(self.engine, tables=[table])
-        seq_name = f"{table.name}_id_seq"
 
-        with self.engine.connect() as conn:
-            escaped_seq = conn.execute(func.quote_ident(seq_name)).scalar()
-            conn.execute(text(f"DROP SEQUENCE IF EXISTS {escaped_seq};"))
-            conn.commit()
-        logger.warning("Table '%s' dropped, sequence '%s' cleared", table.name, seq_name)
+        seq_name = f"{table.name}_id_seq"
+        with self.engine.begin() as conn:
+            quoted = conn.dialect.identifier_preparer.quote(seq_name)
+            conn.execute(text(f"DROP SEQUENCE IF EXISTS {quoted};"))
+        logger.warning("Table '%s' dropped (sequence %s)", table.name, seq_name)
 
     # ------------------------------------------------------------------ #
     # Write
@@ -82,33 +59,22 @@ class PostgresRelationalStore(RelationalStoreBase):
         return {column.name for column in self.row_model.__table__.columns}
 
     def _row_values(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Map record to table columns.
-        Rule:
-        1. Take all top-level keys from input item first
-        2. Then allow metadata / annotation to override values (legacy compatibility)
-        3. Final filter: only keep keys present in known table columns
-        4. Add debug logging for tracing missing critical fields like segment_id
+        """Map a pipeline record onto this table's columns.
+
+        Top-level keys win; ``metadata`` / ``annotation`` only fill columns that
+        are still unset. Unknown keys are dropped, so a single pipeline can feed
+        both datasets without per-dataset row builders.
         """
         known = self._known_columns()
 
-        values = item.copy()
-
-        annotation = item.get("annotation") or {}
-        metadata = item.get("metadata") or {}
-        for source in (metadata, annotation):
+        values = {key: val for key, val in item.items() if key in known}
+        for source in (item.get("metadata"), item.get("annotation")):
+            if not isinstance(source, dict):
+                continue
             for key, value in source.items():
-                if key in known:
+                if key in known and values.get(key) is None:
                     values[key] = value
-        
-        # filter the unknow keys
-        final_values = {
-            key: val
-            for key, val in values.items()
-            if key in known
-        }
-        
-        return final_values
+        return values
 
     def batch_insert(self, rows: List[Dict[str, Any]]) -> int:
         if not rows:
@@ -119,55 +85,64 @@ class PostgresRelationalStore(RelationalStoreBase):
             with self._session() as session:
                 session.add_all(objects)
                 session.commit()
-            logger.info(
-                "Inserted %d rows into '%s'",
-                len(objects),
-                self.row_model.__table__.name,
-            )
-            return len(objects)
         except Exception:
-            logger.exception("Relational batch insert failed")
+            logger.exception("Relational batch insert failed (%d rows)", len(objects))
             return 0
+
+        logger.info(
+            "Inserted %d rows into '%s'", len(objects), self.row_model.__table__.name
+        )
+        return len(objects)
 
     # ------------------------------------------------------------------ #
     # Read
     # ------------------------------------------------------------------ #
+    def _columns(self) -> Dict[str, Any]:
+        return {column.name: column for column in self.row_model.__table__.columns}
+
+    def _filter_pairs(self, filters: Optional[Dict[str, Any]]):
+        columns = self._columns()
+        return [
+            (key, value)
+            for key, value in (filters or {}).items()
+            if key in columns and key not in FILTER_DENYLIST
+        ]
+
     def search_metadata(
         self,
         annotation_conditions: Optional[Dict[str, Any]] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
-        """Ranked metadata search.
+        """Rank rows by annotation-match count.
 
-        * annotation conditions are OR-ed together;
-        * metadata filters are AND-ed together;
-        * score = matched annotation fields / condition count, or 1.0 when
-          there are no annotation conditions.
+        * annotation conditions are OR-ed (score = matched / condition count);
+        * metadata filters are AND-ed and act as a hard filter;
+        * with neither, the call returns nothing: an unscored full-table scan
+          would inject arbitrary candidates and make recall non-reproducible.
         """
+        columns = self._columns()
         ann = [
             (key, value)
             for key, value in (annotation_conditions or {}).items()
-            if key in self.annotation_fields
+            if key in self.annotation_fields and key in columns
         ]
-        columns = {
-            column.name: column
-            for column in self.row_model.__table__.columns
-        }
-        meta = [
-            (key, value)
-            for key, value in (metadata_filters or {}).items()
-            if key in METADATA_FILTER_FIELDS and key in columns
-        ]
+        meta = self._filter_pairs(metadata_filters)
+        if metadata_filters and not meta:
+            logger.warning(
+                "None of the metadata filters %s exist on '%s'; relational recall skipped",
+                sorted(metadata_filters),
+                self.row_model.__table__.name,
+            )
+
+        if not ann and not meta:
+            return []
 
         if ann:
-            score_cases = [
-                case((columns[key] == value, 1), else_=0)
-                for key, value in ann
-            ]
-            match_count = score_cases[0]
-            for score_case in score_cases[1:]:
-                match_count = match_count + score_case
+            score_expressions = [case((columns[key] == value, 1), else_=0) for key, value in ann]
+            match_count = score_expressions[0]
+            for expression in score_expressions[1:]:
+                match_count = match_count + expression
         else:
             match_count = literal(1)
 
@@ -177,34 +152,47 @@ class PostgresRelationalStore(RelationalStoreBase):
         if meta:
             clauses.append(and_(*[columns[key] == value for key, value in meta]))
 
-        stmt = select(
-            self.row_model, match_count.label("match_count")
-        )
-        if clauses:
-            stmt = stmt.where(*clauses)
-        stmt = stmt.order_by(desc(match_count)).limit(limit)
+        stmt = select(self.row_model, match_count.label("match_count")).where(*clauses)
+        # Deterministic ranking: score first, then stable column tie-breakers.
+        stmt = stmt.order_by(
+            desc(match_count),
+            columns["clip_id"].asc(),
+            columns["segment_start"].asc(),
+            columns["id"].asc(),
+        ).limit(limit)
 
         try:
             with self._session() as session:
                 rows_out = session.execute(stmt).all()
         except Exception:
-            logger.exception("Relational query failed")
+            logger.exception("Relational metadata query failed")
             return []
 
         n_conditions = len(ann)
         results: List[Dict[str, Any]] = []
-        for row, match_count in rows_out:
-            hit = {
-                column.name: getattr(row, column.name)
-                for column in self.row_model.__table__.columns
-            }
-            hit["score"] = (
-                float(match_count) / n_conditions
-                if n_conditions > 0
-                else 1.0
-            )
+        for row, matched in rows_out:
+            hit = {name: getattr(row, name) for name in columns}
+            hit["score"] = float(matched) / n_conditions if n_conditions else 1.0
             results.append(hit)
         return results
+
+    def get_segments_by_ids(self, segment_ids: List[str]) -> List[Dict[str, Any]]:
+        """Fetch full rows for ``segment_ids``; used to back-fill annotations."""
+        if not segment_ids:
+            return []
+
+        columns = self._columns()
+        stmt = select(self.row_model).where(
+            columns["segment_id"].in_(list(segment_ids))
+        )
+        try:
+            with self._session() as session:
+                rows = session.execute(stmt).scalars().all()
+        except Exception:
+            logger.exception("Relational segment lookup failed")
+            return []
+
+        return [{name: getattr(row, name) for name in columns} for row in rows]
 
     # ------------------------------------------------------------------ #
     # Lifecycle

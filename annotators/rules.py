@@ -76,7 +76,6 @@ ANNOTATION_RULES_NUSCENES: Dict[str, List[str]] = {
         "night",
         "unknown",
     ],
-    "people_count": ["0", "single", "few", "crowd", "unknown"],
     "cyclist_presence": ["none", "single", "few", "many", "unknown"],
     "road_user_density": ["empty", "sparse", "moderate", "dense", "unknown"],
     "traffic_flow": ["free_flow", "moving_slow", "congested", "stopped", "unknown"],

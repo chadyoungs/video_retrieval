@@ -1,3 +1,10 @@
+"""Legacy dataset discovery helper.
+
+The ingestion pipeline now runs through ``datasets.factory`` + the typed
+``VideoEntry`` adapters. This module is kept only for old scripts; prefer
+``datasets.factory.get_dataset_adapter(...).discover()``.
+"""
+
 import json
 import logging
 from pathlib import Path

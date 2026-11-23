@@ -16,9 +16,14 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
+from config.settings import settings
 from db.models import Base
 from db.models import ActivityNetSegmentRow
 from db.models import NuScenesSegmentRow
+
+# Single source of truth: migrate the database configured in settings / .env
+# instead of the hard-coded URL in alembic.ini.
+config.set_main_option("sqlalchemy.url", settings.pg_dsn)
 # target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
 

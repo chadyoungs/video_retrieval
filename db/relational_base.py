@@ -7,6 +7,9 @@ from typing import Any, Dict, List, Optional
 
 
 class RelationalStoreBase(ABC):
+    #: Annotation fields this dataset can rank / filter on. Set by subclasses.
+    annotation_fields: tuple[str, ...] = ()
+
     @abstractmethod
     def init(self) -> None:
         """Create this dataset's own table if missing."""
@@ -27,6 +30,10 @@ class RelationalStoreBase(ABC):
         limit: int = 5,
     ) -> List[Dict[str, Any]]:
         """Ranked metadata search on this dataset's own table."""
+
+    @abstractmethod
+    def get_segments_by_ids(self, segment_ids: List[str]) -> List[Dict[str, Any]]:
+        """Fetch full rows for the given ``segment_id`` values."""
 
     @abstractmethod
     def close(self) -> None:
