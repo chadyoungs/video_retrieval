@@ -15,6 +15,7 @@ from transformers import AutoModel, AutoProcessor
 
 from config.settings import settings
 from utils.device import resolve_device
+from utils.features import features_to_array
 from utils.hf_models import load_model, load_processor
 
 logger = logging.getLogger(__name__)
@@ -50,5 +51,20 @@ class TextEncoder:
                 text=text, return_tensors="pt", padding=True, truncation=True
             ).to(self.device)
             features = self.model.get_text_features(**inputs)
-            arr = features.detach().cpu().numpy()[0]
+
+        # Surface the concrete type when someone debugs a shape mismatch.
+        logger.debug("Text feature output type: %s", type(features).__name__)
+        # Newer transformers / some checkpoint families return a model output
+        # object instead of a tensor, so normalise before touching ``detach``.
+        arr = features_to_array(features)[0]
+
+        if arr.shape[-1] != self._dim:
+            raise ValueError(
+                f"Text encoder {self.model_name} produced {arr.shape[-1]}-d features "
+                f"but the index expects {self._dim}-d. The checkpoint exposed pooled "
+                "hidden states instead of the projected text embedding (e.g. a "
+                "text-only CLIPTextModel). Load the multimodal checkpoint "
+                "(openai/clip-vit-base-patch32, google/siglip-so400m-patch14-384) "
+                "and keep SEMANTIC_MODEL_TIER aligned with the index."
+            )
         return self._l2_normalize(arr)

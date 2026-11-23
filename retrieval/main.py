@@ -28,6 +28,7 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from config.settings import settings
 from retrieval.service import RetrievalService
 
 
@@ -49,7 +50,7 @@ def _print_row(row: Dict[str, Any]) -> None:
         f"vec={row['vec_score']:.3f} sql={row['sql_score']:.3f} "
         f"coarse={row['coarse_score']:.3f} final={row['rerank_score']:.3f}"
     )
-    print(f"    clip: {row['clip_id']}")
+    print(f"    clip: {row['clip_id']} quality: {row.get('quality_flag')}")
     print(f"    path: {row['video_full_path']}")
     if row.get("annotation"):
         print(f"    annotation: {row['annotation']}")
@@ -79,6 +80,11 @@ def main() -> None:
         help='Metadata AND filters as JSON, e.g. \'{"camera_channel": "CAM_FRONT"}\'',
     )
     parser.add_argument("--no-rerank", action="store_true", help="Return the coarse hybrid order")
+    parser.add_argument(
+        "--only-good",
+        action="store_true",
+        help="Shortcut for metadata filter quality_flag=<ok flag> (see QUALITY_FLAG_OK)",
+    )
     parser.add_argument("--json", action="store_true", help="Print results as JSON")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
@@ -89,6 +95,8 @@ def main() -> None:
     )
     annotation_conditions = _parse_json(args.annotation_conditions, "--annotation-conditions")
     metadata_filters = _parse_json(args.metadata_filters, "--metadata-filters")
+    if args.only_good:
+        metadata_filters.setdefault("quality_flag", settings.quality_flag_ok)
 
     service = RetrievalService(dataset_key=args.dataset)
     try:

@@ -21,19 +21,15 @@ from encoders.base import VideoEncoderBase
 from encoders.keyframe_selector import select_keyframes
 from encoders.video_loader import read_video_frames_raw
 from utils.device import resolve_device
+from utils.features import features_to_array
 from utils.hf_models import load_model, load_processor
 
 logger = logging.getLogger(__name__)
 
 
 def _features_to_array(features: Any) -> np.ndarray:
-    """Accept either a tensor or a model-output object carrying ``pooler_output``."""
-    if isinstance(features, torch.Tensor):
-        return features.detach().cpu().numpy()
-    pooled = getattr(features, "pooler_output", None)
-    if pooled is not None:
-        return pooled.detach().cpu().numpy()
-    raise TypeError(f"Unsupported feature output type: {type(features)!r}")
+    """Accept a tensor or a model output (``image_embeds`` / ``pooler_output``)."""
+    return features_to_array(features)
 
 
 class KeyframeEncoder(VideoEncoderBase):

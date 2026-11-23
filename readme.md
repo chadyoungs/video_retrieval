@@ -120,6 +120,9 @@ python -m retrieval.main --type video --query ./query_clip.mp4 --limit 5
 
 # inspect the coarse order, or emit machine-readable output
 python -m retrieval.main --type text --query "office" --no-rerank --json
+
+# only segments whose annotation passed the quality policy
+python -m retrieval.main --type text --query "busy street" --only-good
 ```
 
 ### How a query is served
@@ -145,8 +148,46 @@ python -m retrieval.main --type text --query "office" --no-rerank --json
      asked for a 0-10 score.
    Missing components (weights absent, Ollama down, no query text) are **skipped and
    the remaining weights renormalized**; with no signal at all the coarse order is
-   kept. Each result carries `score_rule`, `score_cross_encoder`, `score_vlm` and a
-   `rerank_reason` string.
+   kept. Each result carries `segment_id`, `clip_id`, `quality_flag`, `score_rule`,
+   `score_cross_encoder`, `score_vlm` and a `rerank_reason` string.
+
+### Annotation quality flag
+
+Every ingested segment carries the existing `quality_flag`, computed right after
+annotation and before the row is written (`annotators/quality.py`):
+
+- **Enum fields** (`scene_env`, `scene_type`, `people_count`, `lighting`, `time_of_day`):
+  a value that resolves to `unknown` (`unknown`/`unk`/`none`/`n/a`/`""`/`unclear` ...)
+  or falls outside the allowed vocabulary makes the segment `bad`.
+- **`semantic_summary`**: missing, empty, `unknown`, mojibake (`\ufffd` or control
+  characters), a bare placeholder (`[...]`), longer than 512 chars, no letters/digits,
+  more than 30% noise symbols, a single repeated letter, or one token repeated three
+  times all make the segment `bad`.
+- **Meaningless short phrases**: a summary built only from media/filler vocabulary
+  (`unknown scene`, `a video clip`, `no information available`, `some objects`,
+  `nothing is visible`) or one that still hedges (`unknown man walking`,
+  `the footage is unclear`) is `bad` too; so is anything with fewer than two content
+  words (`car`, `street`). Chinese one-liners are compared against the same filler
+  list, so `未知` / `没有内容` / `街道` are rejected while real sentences pass.
+  The hedging test is part of `QUALITY_STRICT_UNKNOWN`.
+
+The rows are still written; bad segments are counted in the ingestion summary
+(`bad_quality_segments`, `quality_reasons`, one log line per reason up to a budget,
+then an aggregate), so a suspicious run is visible immediately.
+
+Four knobs in `.env`:
+
+```bash
+QUALITY_FLAG_OK=ok
+QUALITY_FLAG_BAD=bad                  # or not_ok - anything that fits VARCHAR(16)
+QUALITY_STRICT_UNKNOWN=true           # false = tolerate every unknown enum + hedging text
+QUALITY_UNKNOWN_IGNORE_FIELDS=""      # csv, e.g. time_of_day,lighting
+```
+
+`quality_flag` is not in the Milvus schema, so filtering happens on the PostgreSQL
+side and in the post-fusion hard filter; the value is echoed in every result.
+`--only-good` is shorthand for
+`--metadata-filters '{"quality_flag": "<QUALITY_FLAG_OK>"}'`.
 
 ## Offline checks
 
@@ -155,6 +196,7 @@ These need neither Milvus, PostgreSQL, CLIP weights nor Ollama:
 ```bash
 python -m tests.test_retrieval_offline   # fusion / filters / rerank / loader / SQL
 python -m tests.test_ingestion_offline   # pipeline rows, keys, buffering, --limit
+python -m tests.test_quality_flag        # quality policy only, pure functions
 ```
 
 They cover: segment identity (two segments of one clip must not share scores),
@@ -162,12 +204,28 @@ annotation back-fill, rule scoring and gating, hard metadata filters on fields M
 cannot filter, SQL candidate recall, deterministic relational ranking
 (`search_metadata` returning nothing when unscored), `get_segments_by_ids`, real
 SQLAlchemy query generation (against a temporary SQLite file), frame sampling by
-timestamp, and the ingestion row contract.
+timestamp, the ingestion row contract, the quality policy (unknown enums, garbage
+summaries, persisted `quality_flag`, adapter metadata not being able to fake `ok`),
+and feature-output normalisation (tensor / `text_embeds` / `pooler_output`).
 
 They do **not** cover live ANN behaviour, PG-specific DDL, or real model output - run
 one small ingestion + retrieval pass after pulling, as in the checklist below.
 
 ## Appendix
+
+### Text encoder feature shapes
+
+`transformers` does not always return a tensor from `get_text_features` /
+`get_image_features`; some versions and checkpoint families return a model output
+object (`BaseModelOutputWithPooling`, `CLIPTextModelOutput`). `utils/features.py`
+normalises both (`text_embeds` -> `image_embeds` -> `pooler_output` -> mean-pooled
+`last_hidden_state`), so encoders never call `.detach()` on the wrong object.
+
+If the text encoder then reports `produced N-d features but the index expects M-d`,
+the checkpoint is a text-only encoder (pooler output is the transformer hidden size,
+e.g. 768 instead of 512) - load the multimodal checkpoint
+(`openai/clip-vit-base-patch32` or `google/siglip-so400m-patch14-384`) and keep
+`SEMANTIC_MODEL_TIER` aligned with the dimension of the existing index.
 
 ### Hugging Face download behind the GFW
 

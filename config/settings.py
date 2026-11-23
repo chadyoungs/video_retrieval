@@ -117,6 +117,32 @@ class Settings(BaseSettings):
     num_workers: int = 1
     num_processes: int = 1
 
+    # ========= Annotation quality flag =========
+    # Assessed in annotators/quality.py and written to the existing
+    # ``quality_flag`` column.
+    quality_flag_ok: str = "ok"
+    quality_flag_bad: str = "bad"  # e.g. "not_ok"
+    quality_strict_unknown: bool = True
+    #: Comma separated enum fields whose ``unknown`` value is tolerated, e.g.
+    #: ``QUALITY_UNKNOWN_IGNORE_FIELDS=time_of_day,lighting``. Plain string so
+    #: no JSON parsing is involved; use ``quality_ignored_unknown_fields``.
+    quality_unknown_ignore_fields: str = ""
+
+    @property
+    def quality_ignored_unknown_fields(self) -> list[str]:
+        return [
+            item.strip()
+            for item in self.quality_unknown_ignore_fields.split(",")
+            if item.strip()
+        ]
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.quality_flag_ok == self.quality_flag_bad:
+            raise ValueError("quality_flag_ok and quality_flag_bad must differ")
+        for name in ("quality_flag_ok", "quality_flag_bad"):
+            if len(getattr(self, name)) > 16:
+                raise ValueError(f"{name} must fit the VARCHAR(16) quality_flag column")
+
     # ========= Hybrid recall / Rerank =========
     weight_vector: float = 0.7
     weight_metadata: float = 0.3

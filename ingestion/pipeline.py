@@ -11,11 +11,13 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from tqdm import tqdm
 
 from annotators.factory import get_annotator
+from annotators.quality import assess_annotation_quality
 from config.settings import settings
 from datasets.factory import get_dataset_adapter
 from db.store_factory import get_relational_store, get_vector_store
@@ -61,14 +63,19 @@ class IngestionPipeline:
         self._milvus_buffer: List[Dict[str, Any]] = []
         self._buffer_cap = max(1, settings.batch_size_db)
 
-        self.stats: Dict[str, int] = {
+        self.stats: Dict[str, Any] = {
             "total_videos": 0,
             "processed_videos": 0,
             "failed_videos": 0,
             "total_segments": 0,
             "skipped_segments": 0,
             "inserted_segments": 0,
+            "bad_quality_segments": 0,
+            "quality_reasons": Counter(),
         }
+        # Bad annotations are common (VLM misses a field); log a sample, then
+        # report the aggregate once at the end of the run.
+        self._bad_log_budget = 20
 
     # ------------------------------------------------------------------ #
     # Buffer writes
@@ -144,6 +151,27 @@ class IngestionPipeline:
                     self.stats["skipped_segments"] += 1
                     continue
 
+                quality = assess_annotation_quality(
+                    annotation,
+                    self.annotator.rules,
+                    ok_flag=settings.quality_flag_ok,
+                    bad_flag=settings.quality_flag_bad,
+                    strict_unknown=settings.quality_strict_unknown,
+                    ignore_unknown_fields=settings.quality_ignored_unknown_fields,
+                )
+                if quality.is_bad:
+                    self.stats["bad_quality_segments"] += 1
+                    self.stats["quality_reasons"].update(quality.reasons)
+                    if self._bad_log_budget > 0:
+                        self._bad_log_budget -= 1
+                        logger.warning(
+                            "Bad annotation quality %s [%.2f, %.2f] reasons=%s",
+                            video_file_name,
+                            start,
+                            end,
+                            quality.reason_text,
+                        )
+
                 segment_id = f"{self.dataset_name}_{clip_id}_{int(start * 1000)}_{int(end * 1000)}"
                 base_row = {
                     "segment_id": segment_id,
@@ -157,6 +185,7 @@ class IngestionPipeline:
                     "dataset_split": raw_meta.get("dataset_split", "unknown"),
                     "annotation_model": settings.annotation_model_version,
                     "processing_ts": datetime.now(timezone.utc).isoformat(),
+                    "quality_flag": quality.flag,
                 }
 
                 # Dataset metadata is copied through; the relational store keeps
@@ -212,3 +241,15 @@ class IngestionPipeline:
             self._flush_buffer()
 
         logger.info("Ingestion finished. stats: %s", self.stats)
+        if self.stats["bad_quality_segments"]:
+            top_reasons = ", ".join(
+                f"{reason}={count}"
+                for reason, count in self.stats["quality_reasons"].most_common(10)
+            )
+            logger.warning(
+                "Quality summary: %d/%d segments flagged '%s' (top reasons: %s)",
+                self.stats["bad_quality_segments"],
+                self.stats["inserted_segments"],
+                settings.quality_flag_bad,
+                top_reasons,
+            )

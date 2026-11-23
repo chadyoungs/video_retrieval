@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import ingestion.pipeline as pipeline_module
 from config.settings import settings
+from annotators.rules import ANNOTATION_RULES_ACTIVITYNET
 from db.models import ActivityNetSegmentRow
 from tests.fakes import InMemoryRelationalStore, InMemoryVectorStore
 
@@ -36,8 +37,13 @@ ANNOTATION = {
 
 
 class FakeAnnotator:
+    rules = ANNOTATION_RULES_ACTIVITYNET
+
+    def __init__(self, annotation: Optional[dict] = None) -> None:
+        self.annotation = dict(annotation or ANNOTATION)
+
     def annotate(self, video_path, start, end, sample_rate, preloaded_frames=None):
-        return dict(ANNOTATION)
+        return dict(self.annotation)
 
 
 class FakeEncoder:
@@ -92,9 +98,14 @@ def _make_video(path: Path) -> None:
     )
 
 
-def _install_fakes(video_file: str, rel: InMemoryRelationalStore, vec: InMemoryVectorStore) -> None:
+def _install_fakes(
+    video_file: str,
+    rel: InMemoryRelationalStore,
+    vec: InMemoryVectorStore,
+    annotation: Optional[dict] = None,
+) -> None:
     pipeline_module.get_default_encoder = lambda: FakeEncoder()
-    pipeline_module.get_annotator = lambda dataset_name: FakeAnnotator()
+    pipeline_module.get_annotator = lambda dataset_name: FakeAnnotator(annotation)
     pipeline_module.get_relational_store = lambda dataset_name: rel
     pipeline_module.get_vector_store = lambda dataset_name: vec
     pipeline_module.get_dataset_adapter = lambda dataset_name: FakeAdapter(video_file)
@@ -184,8 +195,114 @@ def test_pipeline_limit() -> None:
     print("ok  --limit is applied before ingestion")
 
 
+def _run_quality_pass(video: Path, annotation: dict) -> tuple:
+    """Ingest the demo clip once with the given annotation and return the stores."""
+    rel = InMemoryRelationalStore(
+        rows=[], annotation_fields=tuple(ANNOTATION), columns=ACTIVITYNET_COLUMNS
+    )
+    vec = InMemoryVectorStore(hits=[])
+    _install_fakes(str(video), rel, vec, annotation=annotation)
+
+    original = (settings.clip_duration_sec, settings.clip_overlap_sec, settings.frame_sampling_rate)
+    settings.clip_duration_sec = 5.0
+    settings.clip_overlap_sec = 0.0
+    settings.frame_sampling_rate = 2
+    try:
+        pipeline = pipeline_module.IngestionPipeline(dataset_name="activitynet")
+        pipeline.run()
+    finally:
+        (settings.clip_duration_sec, settings.clip_overlap_sec, settings.frame_sampling_rate) = original
+    return pipeline, rel
+
+
+def test_quality_flag_is_persisted() -> None:
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        print("skip quality flag check (opencv not installed)")
+        return
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    video = tmp_dir / "demo_clip.mp4"
+    _make_video(video)
+
+    # Clean annotation -> rows flagged ok, no quality warnings.
+    clean, clean_rel = _run_quality_pass(video, ANNOTATION)
+    assert clean.stats["bad_quality_segments"] == 0, clean.stats
+    assert all(row["quality_flag"] == settings.quality_flag_ok for row in clean_rel.rows), (
+        clean_rel.rows[0]["quality_flag"]
+    )
+
+    # Unknown enum + meaningless summary -> rows flagged bad and counted.
+    bad_annotation = dict(ANNOTATION, time_of_day="unknown", semantic_summary="???")
+    dirty, dirty_rel = _run_quality_pass(video, bad_annotation)
+    assert dirty.stats["bad_quality_segments"] == len(dirty_rel.rows), dirty.stats
+    assert dirty.stats["quality_reasons"]["unknown:time_of_day"] == len(dirty_rel.rows)
+    assert dirty.stats["quality_reasons"]["summary_no_text"] == len(dirty_rel.rows)
+    assert all(
+        row["quality_flag"] == settings.quality_flag_bad for row in dirty_rel.rows
+    )
+    assert all(row["semantic_summary"] == "???" for row in dirty_rel.rows), "bad rows are still stored"
+    print(
+        f"ok  quality_flag persisted ({settings.quality_flag_ok}/{settings.quality_flag_bad}) "
+        f"across {len(dirty_rel.rows)} segments"
+    )
+
+
+def test_metadata_quality_flag_is_overridden() -> None:
+    """A dataset adapter that already stamps quality_flag must not beat the assessment."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    video = tmp_dir / "demo_clip.mp4"
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        print("skip quality override check (opencv not installed)")
+        return
+    _make_video(video)
+
+    rel = InMemoryRelationalStore(
+        rows=[], annotation_fields=tuple(ANNOTATION), columns=ACTIVITYNET_COLUMNS
+    )
+    vec = InMemoryVectorStore(hits=[])
+    _install_fakes(
+        str(video),
+        rel,
+        vec,
+        annotation=dict(ANNOTATION, scene_type="unknown"),
+    )
+    original_discover = FakeAdapter.discover
+
+    def discover_with_flag(self):
+        entries = original_discover(self)
+        entries[0].metadata["quality_flag"] = settings.quality_flag_ok  # stale "ok"
+        return entries
+
+    FakeAdapter.discover = discover_with_flag
+    original = (settings.clip_duration_sec, settings.clip_overlap_sec, settings.frame_sampling_rate)
+    settings.clip_duration_sec = 12.0
+    settings.clip_overlap_sec = 0.0
+    settings.frame_sampling_rate = 2
+    try:
+        pipeline = pipeline_module.IngestionPipeline(dataset_name="activitynet")
+        pipeline.run()
+    finally:
+        FakeAdapter.discover = original_discover
+        (settings.clip_duration_sec, settings.clip_overlap_sec, settings.frame_sampling_rate) = original
+
+    assert rel.rows, "no rows were written"
+    assert all(row["quality_flag"] == settings.quality_flag_bad for row in rel.rows), (
+        "metadata quality_flag overrode the computed assessment"
+    )
+    print("ok  adapter metadata cannot fake the annotation assessment")
+
+
 def main() -> None:
-    tests = [test_pipeline_rows_and_segments, test_pipeline_limit]
+    tests = [
+        test_pipeline_rows_and_segments,
+        test_pipeline_limit,
+        test_quality_flag_is_persisted,
+        test_metadata_quality_flag_is_overridden,
+    ]
     failed = 0
     for test in tests:
         try:

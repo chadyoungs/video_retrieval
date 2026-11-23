@@ -371,7 +371,13 @@ class RetrievalService:
     @classmethod
     def _passes_filters(cls, record: Dict[str, Any], filters: Dict[str, Any]) -> bool:
         for key, expected in filters.items():
-            actual = record.get(key, record["metadata"].get(key, record["annotation"].get(key)))
+            # Top-level first, then metadata / annotation: a placeholder ``None``
+            # at the top level must not shadow the real value further down.
+            actual = record.get(key)
+            if actual is None:
+                actual = record["metadata"].get(key)
+            if actual is None:
+                actual = record["annotation"].get(key)
             if actual is None:
                 # Not stored for this dataset or segment: cannot evaluate.
                 continue
@@ -407,6 +413,7 @@ class RetrievalService:
             "segment_end": hit.get("segment_end"),
             "dataset_name": hit.get("dataset_name"),
             "camera_channel": hit.get("camera_channel"),
+            "quality_flag": hit.get("quality_flag"),
         }
 
     @staticmethod
@@ -562,6 +569,8 @@ class RetrievalService:
             "segment_end": record.get("segment_end"),
             "dataset_name": record.get("dataset_name"),
             "camera_channel": record.get("camera_channel"),
+            "quality_flag": record.get("quality_flag")
+            or (record.get("metadata") or {}).get("quality_flag"),
             "annotation": record.get("annotation") or {},
             "metadata": record.get("metadata") or {},
         }

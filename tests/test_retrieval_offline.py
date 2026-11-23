@@ -79,6 +79,12 @@ ROWS: List[Dict[str, Any]] = [
     },
 ]
 
+# Quality flags: the first segment carries a dirty annotation, the rest are clean.
+# Milvus never stores this column, so the filter must work through the
+# PostgreSQL backfill / post-merge hard filter.
+for _row, _flag in zip(ROWS, ("bad", "ok", "ok")):
+    _row["quality_flag"] = _flag
+
 # Vector scores are already normalised to [0, 1] by the store adapter.
 VEC_HITS: List[Dict[str, Any]] = [
     {
@@ -188,6 +194,25 @@ def test_no_rerank_output_contract() -> None:
     assert required.issubset(results[0]), required - set(results[0])
     assert results[0]["video_full_path"].endswith(".mp4")
     print("ok  coarse output contract")
+
+
+def test_quality_flag_in_payload_and_filter() -> None:
+    service = build_service()
+    results = service.search_text("people outside", rerank=False, limit=5)
+    flags = {row["segment_id"]: row["quality_flag"] for row in results}
+    assert flags["activitynet_a_0_10000"] == "bad", flags
+    assert flags["activitynet_b_0_10000"] == "ok", flags
+
+    good_only = service.search_text(
+        "people outside",
+        metadata_filters={"quality_flag": "ok"},
+        rerank=False,
+        limit=5,
+    )
+    ids = [row["segment_id"] for row in good_only]
+    assert "activitynet_a_0_10000" not in ids, "bad-quality segment survived the filter"
+    assert ids, "quality filter removed everything"
+    print("ok  quality_flag is exposed and filters bad segments")
 
 
 def test_annotation_backfill() -> None:
@@ -353,6 +378,39 @@ def test_optional_components_degrade_gracefully() -> None:
     print("ok  missing CE / VLM are skipped and weights renormalized")
 
 
+def test_feature_output_normalisation() -> None:
+    """``get_text_features`` may return a model output object, not a tensor."""
+    import torch
+    from types import SimpleNamespace
+
+    from utils.features import features_to_array
+
+    tensor = torch.ones(2, 4)
+    assert features_to_array(tensor).shape == (2, 4)
+
+    # ``BaseModelOutputWithPooling``: pooler_output wins over last_hidden_state.
+    pooled = SimpleNamespace(
+        pooler_output=torch.ones(2, 4), last_hidden_state=torch.zeros(2, 3, 4)
+    )
+    assert features_to_array(pooled).shape == (2, 4)
+    assert abs(float(features_to_array(pooled).sum()) - 8.0) < 1e-6
+
+    assert features_to_array(SimpleNamespace(text_embeds=torch.ones(1, 3))).shape == (1, 3)
+    assert features_to_array(SimpleNamespace(image_embeds=torch.ones(1, 3))).shape == (1, 3)
+
+    # No projection head: mean-pool the hidden states instead of crashing.
+    mean_pooled = SimpleNamespace(last_hidden_state=torch.ones(1, 2, 6))
+    assert features_to_array(mean_pooled).shape == (1, 6)
+
+    try:
+        features_to_array(SimpleNamespace())
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("empty model output must raise TypeError")
+    print("ok  feature outputs are normalised (tensor / text_embeds / pooler_output)")
+
+
 def test_video_loader_sampling() -> None:
     """Frame sampling uses real timestamps and honours the requested window."""
     try:
@@ -397,6 +455,7 @@ def main() -> None:
     tests = [
         test_segments_stay_distinct,
         test_no_rerank_output_contract,
+        test_quality_flag_in_payload_and_filter,
         test_annotation_backfill,
         test_rule_scoring_orders_candidates,
         test_metadata_filter_is_hard,
@@ -405,6 +464,7 @@ def main() -> None:
         test_sql_candidates_enter_recall,
         test_postgres_store_sql_generation,
         test_optional_components_degrade_gracefully,
+        test_feature_output_normalisation,
         test_video_loader_sampling,
     ]
     failed = 0
