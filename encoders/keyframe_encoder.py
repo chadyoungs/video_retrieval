@@ -14,15 +14,17 @@ from typing import Any, List, Optional, Union
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoModel, AutoProcessor
 
+# Import the HF env/config helper before ``transformers`` so HF_ENDPOINT is
+# live when the hub reads its constants.
 from config.settings import settings
+from utils.hf_models import load_model, load_processor
+from utils.device import resolve_device
+from utils.features import features_to_array
 from encoders.base import VideoEncoderBase
 from encoders.keyframe_selector import select_keyframes
 from encoders.video_loader import read_video_frames_raw
-from utils.device import resolve_device
-from utils.features import features_to_array
-from utils.hf_models import load_model, load_processor
+from transformers import AutoModel, AutoProcessor
 
 logger = logging.getLogger(__name__)
 

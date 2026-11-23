@@ -76,6 +76,11 @@ class RetrievalService:
 
         self.relational_store = relational_store or get_relational_store(self.dataset_key)
         self.vector_store = vector_store or get_vector_store(self.dataset_key)
+        # Load existing tables / collections (create them if absent). Without
+        # this the Milvus store keeps ``_collection = None`` and search returns
+        # an empty pool with a "not initialised" warning.
+        self.relational_store.init()
+        self.vector_store.init()
         self.reranker = reranker or get_reranker(self.dataset_key)
         self.encoder = encoder or get_default_encoder()
         self.text_encoder = text_encoder or get_text_encoder()

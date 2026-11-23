@@ -6,6 +6,7 @@ variable is the upper-cased name (e.g. ``PG_DSN``, ``DATASET_SOURCE``).
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -185,3 +186,9 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Export the HF endpoint before any huggingface_hub / transformers import
+# downstream: the hub caches ``HF_ENDPOINT`` at import time, so the value must
+# already be in ``os.environ`` when those packages load.
+if settings.hf_endpoint:
+    os.environ["HF_ENDPOINT"] = settings.hf_endpoint

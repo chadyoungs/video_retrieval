@@ -235,7 +235,10 @@ export HF_ENDPOINT="https://hf-mirror.com"
 hf download google/siglip-so400m-patch14-384
 ```
 
-`config/settings.py` also sets `HF_ENDPOINT` from `HF_ENDPOINT` for in-process loads.
+`HF_ENDPOINT` in `.env` maps to `settings.hf_endpoint`. `utils/hf_models.py`
+exports it **before** `transformers` / `huggingface_hub` is imported (the hub
+caches the endpoint at import time), and hub downloads land in
+`MODEL_CACHE_DIR`. To use the official hub, set `HF_ENDPOINT=` (empty).
 
 ### CUDA
 

@@ -12,13 +12,14 @@ Examples
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
-from transformers import AutoModel, AutoProcessor
-
+# Import the HF env/config helper before ``transformers`` so HF_ENDPOINT is
+# live when the hub reads its constants.
 from config.settings import settings
-from utils.hf_models import cache_root, local_model_dir
+from utils.hf_models import _hub_kwargs, cache_root, local_model_dir
+
+from transformers import AutoModel, AutoProcessor
 
 PRESET_MAP = {
     "clip": "openai/clip-vit-base-patch32",
@@ -31,23 +32,20 @@ def download_model(repo_id: str, force: bool = False) -> Path:
     save_dir = local_model_dir(repo_id)
     cache_root().mkdir(parents=True, exist_ok=True)
 
-    if settings.hf_endpoint:
-        os.environ["HF_ENDPOINT"] = settings.hf_endpoint
-
     if save_dir.exists() and any(save_dir.iterdir()) and not force:
         print(f"already present: {save_dir}")
         return save_dir
 
     print(f"downloading {repo_id} -> {save_dir}")
-    model = AutoModel.from_pretrained(repo_id)
+    model = AutoModel.from_pretrained(repo_id, **_hub_kwargs())
     model.save_pretrained(save_dir)
     try:
-        processor = AutoProcessor.from_pretrained(repo_id)
+        processor = AutoProcessor.from_pretrained(repo_id, **_hub_kwargs())
         processor.save_pretrained(save_dir)
     except Exception:  # noqa: BLE001 - rerankers only need a tokenizer
         from transformers import AutoTokenizer
 
-        AutoTokenizer.from_pretrained(repo_id).save_pretrained(save_dir)
+        AutoTokenizer.from_pretrained(repo_id, **_hub_kwargs()).save_pretrained(save_dir)
     print(f"saved: {save_dir}")
     return save_dir
 
