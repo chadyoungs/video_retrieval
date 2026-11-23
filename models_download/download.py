@@ -14,12 +14,9 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-# Import the HF env/config helper before ``transformers`` so HF_ENDPOINT is
-# live when the hub reads its constants.
-from config.settings import settings
-from utils.hf_models import _hub_kwargs, cache_root, local_model_dir
-
-from transformers import AutoModel, AutoProcessor
+# Import the HF env/config helper before ``huggingface_hub`` so HF_ENDPOINT
+# is live when the hub reads its constants.
+from utils.hf_models import download_repo, local_model_dir
 
 PRESET_MAP = {
     "clip": "openai/clip-vit-base-patch32",
@@ -30,22 +27,12 @@ PRESET_MAP = {
 
 def download_model(repo_id: str, force: bool = False) -> Path:
     save_dir = local_model_dir(repo_id)
-    cache_root().mkdir(parents=True, exist_ok=True)
-
     if save_dir.exists() and any(save_dir.iterdir()) and not force:
         print(f"already present: {save_dir}")
         return save_dir
 
-    print(f"downloading {repo_id} -> {save_dir}")
-    model = AutoModel.from_pretrained(repo_id, **_hub_kwargs())
-    model.save_pretrained(save_dir)
-    try:
-        processor = AutoProcessor.from_pretrained(repo_id, **_hub_kwargs())
-        processor.save_pretrained(save_dir)
-    except Exception:  # noqa: BLE001 - rerankers only need a tokenizer
-        from transformers import AutoTokenizer
-
-        AutoTokenizer.from_pretrained(repo_id, **_hub_kwargs()).save_pretrained(save_dir)
+    # One folder, one copy: files land directly in models/<basename>.
+    download_repo(repo_id)
     print(f"saved: {save_dir}")
     return save_dir
 

@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 from config.settings import settings
 
@@ -56,43 +56,66 @@ def _apply_hf_env() -> None:
 _apply_hf_env()
 
 
-def _hub_kwargs() -> Dict[str, Any]:
-    """Hub-side download kwargs: land weights in our own cache root."""
-    return {"cache_dir": str(cache_root())}
+def download_repo(model_name: str) -> Path:
+    """Download the repo straight into ``models/<basename>`` - one copy only.
+
+    ``snapshot_download(local_dir=...)`` writes plain files into the target
+    folder (no hub blob cache, no ``org/name`` nesting, no save_pretrained
+    re-export). Non-PyTorch weight formats are skipped; when the repo ships
+    both ``.bin`` and ``.safetensors`` only the safetensors are fetched.
+    """
+    from huggingface_hub import HfApi, snapshot_download
+
+    folder = local_model_dir(model_name)
+    folder.mkdir(parents=True, exist_ok=True)
+
+    ignore = [
+        "*.h5", "*.msgpack", "*.ot", "*.onnx", "onnx/*",
+        "flax_model*", "tf_model*", "rust_model*",
+    ]
+    try:
+        files = [s.rfilename for s in HfApi().model_info(model_name).siblings]
+        if any(f.endswith(".safetensors") for f in files) and any(
+            f.endswith(".bin") for f in files
+        ):
+            ignore.append("*.bin")
+    except Exception:  # noqa: BLE001 - metadata is best effort
+        logger.debug("Could not list repo files for %s; downloading all formats", model_name)
+
+    logger.info(
+        "Downloading %s from %s into %s",
+        model_name,
+        settings.hf_endpoint or "the default hub",
+        folder,
+    )
+    snapshot_download(repo_id=model_name, local_dir=str(folder), ignore_patterns=ignore)
+    return folder
 
 
 def load_model(model_name: str, model_cls: Any) -> Any:
     """Load ``model_cls`` for ``model_name`` from the local cache or hub."""
     folder = local_model_dir(model_name)
-    if folder.exists() and any(folder.iterdir()):
-        logger.info("Loading %s from local cache %s", model_name, folder)
-        return model_cls.from_pretrained(folder, local_files_only=True)
+    if not (folder.exists() and any(folder.iterdir())):
+        if settings.hf_local_only:
+            raise FileNotFoundError(
+                f"Model {model_name} is not present under {folder} and "
+                f"settings.hf_local_only=True. Run: python -m models_download.download "
+                f"--repo-id {model_name}"
+            )
+        download_repo(model_name)
 
-    if settings.hf_local_only:
-        raise FileNotFoundError(
-            f"Model {model_name} is not present under {folder} and "
-            f"settings.hf_local_only=True. Run: python -m models_download.download "
-            f"--repo-id {model_name}"
-        )
-
-    logger.warning(
-        "Model %s not found under %s; downloading from %s",
-        model_name,
-        folder,
-        settings.hf_endpoint or "the default hub",
-    )
-    model = model_cls.from_pretrained(model_name, **_hub_kwargs())
-    folder.mkdir(parents=True, exist_ok=True)
-    try:
-        model.save_pretrained(folder)
-    except Exception:  # noqa: BLE001 - cache write is best effort
-        logger.warning("Could not persist %s into %s", model_name, folder, exc_info=True)
-    return model
+    logger.info("Loading %s from local cache %s", model_name, folder)
+    return model_cls.from_pretrained(folder, local_files_only=True)
 
 
 def load_processor(model_name: str, processor_cls: Any) -> Any:
     """Load the matching processor / tokenizer for ``model_name``."""
     folder = local_model_dir(model_name)
-    if folder.exists() and any(folder.iterdir()):
-        return processor_cls.from_pretrained(folder, local_files_only=True)
-    return processor_cls.from_pretrained(model_name, **_hub_kwargs())
+    if not (folder.exists() and any(folder.iterdir())):
+        if settings.hf_local_only:
+            raise FileNotFoundError(
+                f"Model {model_name} is not present under {folder}; "
+                "run models_download.download first"
+            )
+        download_repo(model_name)
+    return processor_cls.from_pretrained(folder, local_files_only=True)
