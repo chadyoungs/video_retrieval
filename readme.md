@@ -30,9 +30,22 @@ reranker on top.
 - CUDA GPU recommended (RTX 3060 Ti 8G is enough for CLIP base + keyframes)
 
 ```bash
+# venv setup (from the repository root)
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -U pip
 pip install -r requirements.txt
-cp .env.example .env   # then edit paths / DSN / endpoints
+cp .env.example .env               # then edit paths / DSN / endpoints
 ```
+
+Notes:
+- On a CUDA box install the matching torch build first if the default wheel is
+  CPU-only (see https://pytorch.org), then the rest of requirements.
+- `--show` popups need no GUI toolkit: the viewer renders a PNG and opens it
+  with the system image viewer / browser (stdlib `webbrowser`). On a headless
+  server you get the PNG path in the log.
+- `.venv/` is git-ignored; every `python -m ...` command below assumes the venv
+  is activated.
 
 Run every command **from the repository root** (`python -m ...` resolves imports from
 the current directory).
@@ -123,7 +136,17 @@ python -m retrieval.main --type text --query "office" --no-rerank --json
 
 # only segments whose annotation passed the quality policy
 python -m retrieval.main --type text --query "busy street" --only-good
+
+# visual check: 3 frames + metrics per hit, PNG saved under retrieval_views/
+# and popped up with the system viewer (headless servers: PNG path in the log)
+python -m retrieval.main --type text --query "busy street" --show --show-frames 3
 ```
+
+The viewer (`retrieval/viewer.py`, matplotlib) samples frames from each hit's
+`[segment_start, segment_end)` window and shows vec / sql / coarse / rerank
+scores, component scores, `quality_flag`, the annotation summary and the rerank
+reason next to them. Missing videos render a placeholder instead of failing.
+API: `from retrieval.viewer import show_results; show_results(results, query=...)`.
 
 ### How a query is served
 
@@ -197,6 +220,7 @@ These need neither Milvus, PostgreSQL, CLIP weights nor Ollama:
 python -m tests.test_retrieval_offline   # fusion / filters / rerank / loader / SQL
 python -m tests.test_ingestion_offline   # pipeline rows, keys, buffering, --limit
 python -m tests.test_quality_flag        # quality policy only, pure functions
+python -m tests.test_viewer_offline      # result viewer renders headless (Agg)
 ```
 
 They cover: segment identity (two segments of one clip must not share scores),

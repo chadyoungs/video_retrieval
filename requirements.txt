@@ -3,6 +3,8 @@
 # ---------------------------------------------------------------------------
 torch>=2.1
 transformers>=4.40
+# Direct dependency: snapshot_download / HfApi in utils/hf_models.py
+huggingface_hub>=0.23
 Pillow>=10.0
 numpy>=1.24
 scipy>=1.10
@@ -36,9 +38,10 @@ pydantic-settings>=2.2
 requests>=2.31
 
 # ---------------------------------------------------------------------------
-# Progress bars
+# Progress bars / result viewer (--show)
 # ---------------------------------------------------------------------------
 tqdm>=4.66
-
-joblib>=1.6.0
+# Result viewer (--show): renders a PNG and pops it up with the system
+# image viewer / browser (stdlib webbrowser). No GUI toolkit needed.
+matplotlib>=3.8
 

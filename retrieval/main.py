@@ -86,6 +86,14 @@ def main() -> None:
         help="Shortcut for metadata filter quality_flag=<ok flag> (see QUALITY_FLAG_OK)",
     )
     parser.add_argument("--json", action="store_true", help="Print results as JSON")
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        help="Pop up a window with frames + metrics per hit (also saves a PNG)",
+    )
+    parser.add_argument(
+        "--show-frames", type=int, default=3, help="Frames per segment in the view"
+    )
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
@@ -129,12 +137,17 @@ def main() -> None:
 
     if args.json:
         print(json.dumps(results, ensure_ascii=False, indent=2, default=str))
-        return
-    if not results:
+    elif not results:
         print("No matches.")
-        return
-    for row in results:
-        _print_row(row)
+    else:
+        for row in results:
+            _print_row(row)
+
+    if args.show and results:
+        # Imported lazily so matplotlib stays optional for plain CLI use.
+        from retrieval.viewer import show_results
+
+        show_results(results, query=args.query, frames_per_segment=args.show_frames)
 
 
 if __name__ == "__main__":
