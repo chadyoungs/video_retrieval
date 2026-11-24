@@ -2,8 +2,8 @@
 
 ActivityNet annotates a simplified scene subset; NuScenes keeps the full
 driving-context annotation set. ``semantic_summary`` is free text for both.
-These lists are the single source for the VLM prompt, the Ollama output schema
-and output validation.
+These lists are the single source for the VLM prompt, the LMStudio/Ollama output 
+schema and output validation.
 """
 
 from __future__ import annotations

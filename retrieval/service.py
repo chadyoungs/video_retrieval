@@ -172,6 +172,7 @@ class RetrievalService:
             return []
 
         embedding, frames = self._encode_video_query(query_video_path, start_sec, end_sec)
+
         if embedding is None:
             logger.warning("Query video embedding unavailable: %s", query_video_path)
             return []
