@@ -378,6 +378,61 @@ def test_optional_components_degrade_gracefully() -> None:
     print("ok  missing CE / VLM are skipped and weights renormalized")
 
 
+def test_video_query_uses_encoder_frames() -> None:
+    """search_video must feed the VLM the encoder's own frame representation."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        print("skip video-query check (opencv not installed)")
+        return
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    video = tmp_dir / "query.mp4"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc=size=160x120:rate=30", "-t", "6",
+         "-pix_fmt", "yuv420p", str(video)],
+        check=True,
+    )
+
+    captured = {}
+
+    class CapturingReranker:
+        def rerank(self, query, candidates, annotation_conditions=None,
+                   metadata_filters=None, query_image_path=None,
+                   query_image_paths=None):
+            captured["paths"] = list(query_image_paths or [])
+            captured["single"] = query_image_path
+            captured["exists"] = [Path(p).exists() for p in captured["paths"]]
+            return []
+
+    class StubEncoder:
+        dim = 8
+
+        def encode(self, video_path=None, start=None, end=None, preloaded_frames=None):
+            import numpy as np
+            return np.ones(self.dim, dtype="float32")
+
+        def select_query_frames(self, frames):
+            # Deterministic "keyframe" stand-in: first and last frame.
+            return [frames[0], frames[-1]]
+
+    service = build_service()
+    service.encoder = StubEncoder()
+    service.reranker = CapturingReranker()
+
+    service.search_video(str(video), limit=3)
+
+    assert captured["single"] is None, "video query still uses a single substitute frame"
+    assert len(captured["paths"]) == 2, captured
+    assert all(captured["exists"]), "query frames were not readable files"
+    assert not any(Path(p).exists() for p in captured["paths"]), "temp frames not cleaned up"
+    print("ok  video query reranks with the encoder's frame set, not one frame")
+
+
 def test_feature_output_normalisation() -> None:
     """``get_text_features`` may return a model output object, not a tensor."""
     import torch
@@ -464,6 +519,7 @@ def main() -> None:
         test_sql_candidates_enter_recall,
         test_postgres_store_sql_generation,
         test_optional_components_degrade_gracefully,
+        test_video_query_uses_encoder_frames,
         test_feature_output_normalisation,
         test_video_loader_sampling,
     ]

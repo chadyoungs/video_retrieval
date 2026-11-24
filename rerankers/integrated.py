@@ -154,7 +154,7 @@ class IntegratedReranker(BaseReranker):
         self,
         query: str,
         items: List[RetrievalItem],
-        query_image_path: Optional[str],
+        query_images_b64: List[str],
     ) -> Optional[List[float]]:
         """VLM 0-10 relevance per candidate; ``None`` when unavailable."""
         if not self._vlm_available:
@@ -162,9 +162,22 @@ class IntegratedReranker(BaseReranker):
 
         import requests
 
-        query_image_b64 = self._image_path_to_b64(query_image_path)
         scores: List[float] = []
         scored_any = False
+        n_query = len(query_images_b64)
+        if n_query > 1:
+            visual_note = (
+                f"The first {n_query} images are frames of the query video in "
+                "temporal order; the last image is a frame from the candidate "
+                "segment. Judge the match against the whole query video.\n"
+            )
+        elif n_query == 1:
+            visual_note = (
+                "The first image is the query image; the last image is a frame "
+                "from the candidate segment.\n"
+            )
+        else:
+            visual_note = ""
 
         for item in items:
             frame_b64 = self._candidate_frame_b64(item)
@@ -176,10 +189,11 @@ class IntegratedReranker(BaseReranker):
             prompt = (
                 "Rate how well this video segment matches the query on a scale of "
                 "0 to 10. Output the integer only, no explanation.\n"
-                f"Query: {query or 'visually similar frame'}\n"
+                + visual_note
+                + f"Query: {query or 'visually similar content'}\n"
                 f"Annotation: {self._candidate_text(item)}"
             )
-            images = [query_image_b64, frame_b64] if query_image_b64 else [frame_b64]
+            images = query_images_b64 + [frame_b64]
             payload = {
                 "model": self.ollama_model,
                 "prompt": prompt,
@@ -310,6 +324,7 @@ class IntegratedReranker(BaseReranker):
         annotation_conditions: Optional[Dict[str, Any]] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         query_image_path: Optional[str] = None,
+        query_image_paths: Optional[List[str]] = None,
     ) -> List[RerankedItem]:
         if not candidates:
             logger.debug("Rerank input candidates empty")
@@ -334,7 +349,15 @@ class IntegratedReranker(BaseReranker):
 
         rule_scores = [self._score_rule(item, conditions) for item in gated]
         ce_scores = self._score_cross_encoder(query.strip(), gated)
-        vlm_scores = self._score_vlm(query.strip(), gated, query_image_path)
+
+        query_images_b64: List[str] = []
+        for path in ([query_image_path] if query_image_path else []) + list(
+            query_image_paths or []
+        ):
+            b64 = self._image_path_to_b64(path)
+            if b64:
+                query_images_b64.append(b64)
+        vlm_scores = self._score_vlm(query.strip(), gated, query_images_b64)
 
         weights = {
             "rule": (self.w_rule if rule_scores[0] is not None else 0.0),

@@ -161,7 +161,12 @@ class RetrievalService:
         limit: int = 5,
         rerank: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Embed the query clip with the ingestion path; a middle frame feeds the VLM."""
+        """Embed the query clip with the configured encoder.
+
+        The VLM reranker sees the *same* frame representation the encoder
+        consumed (keyframes for the keyframe encoder, a uniform clip sample
+        otherwise) - never a single substitute frame.
+        """
         if not os.path.exists(query_video_path):
             logger.warning("Query video not found: %s", query_video_path)
             return []
@@ -171,9 +176,13 @@ class RetrievalService:
             logger.warning("Query video embedding unavailable: %s", query_video_path)
             return []
 
-        query_image_path: Optional[str] = None
+        query_image_paths: List[str] = []
         if frames:
-            query_image_path = self._save_frame(frames[len(frames) // 2])
+            for frame in self.encoder.select_query_frames(frames):
+                try:
+                    query_image_paths.append(self._save_frame(frame))
+                except Exception:  # noqa: BLE001 - rerank visual is optional
+                    logger.warning("Could not persist a query frame", exc_info=True)
 
         try:
             return self.hybrid_search(
@@ -182,14 +191,14 @@ class RetrievalService:
                 metadata_filters=metadata_filters,
                 limit=limit,
                 rerank=rerank,
-                query_image_path=query_image_path,
+                query_image_paths=query_image_paths,
             )
         finally:
-            if query_image_path and os.path.exists(query_image_path):
+            for path in query_image_paths:
                 try:
-                    os.unlink(query_image_path)
+                    os.unlink(path)
                 except OSError:
-                    logger.debug("Could not remove temp frame %s", query_image_path)
+                    logger.debug("Could not remove temp frame %s", path)
 
     # ------------------------------------------------------------------ #
     # Hybrid recall + fusion
@@ -199,6 +208,7 @@ class RetrievalService:
         query_embedding: List[float],
         query_text: str = "",
         query_image_path: Optional[str] = None,
+        query_image_paths: Optional[List[str]] = None,
         annotation_conditions: Optional[Dict[str, Any]] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         limit: int = 5,
@@ -248,6 +258,7 @@ class RetrievalService:
             annotation_conditions=annotation_conditions,
             metadata_filters=metadata_filters,
             query_image_path=query_image_path,
+            query_image_paths=query_image_paths,
         )
         logger.info("Rerank returned %d of %d candidates", len(reranked), len(candidates))
         return self._to_output(ordered, reranked)
@@ -476,9 +487,12 @@ class RetrievalService:
     def _save_frame(frame: Any) -> str:
         import cv2
 
+        arr = np.asarray(frame)  # PIL RGB or ndarray
+        if arr.ndim == 3 and arr.shape[2] == 3:
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
         handle = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         handle.close()
-        cv2.imwrite(handle.name, frame)
+        cv2.imwrite(handle.name, arr)
         return handle.name
 
     # ------------------------------------------------------------------ #

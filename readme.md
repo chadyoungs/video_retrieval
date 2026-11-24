@@ -167,8 +167,9 @@ API: `from retrieval.viewer import show_results; show_results(results, query=...
    - *rule gate*: `metadata_filters` AND, hard drop;
    - *rule score*: `annotation_conditions` OR-match ratio (only when conditions exist);
    - *cross-encoder*: query vs annotation text, sigmoid score;
-   - *VLM*: query (text or image) plus one frame extracted from the candidate segment,
-     asked for a 0-10 score.
+   - *VLM*: query (text, image, or the video query's own frame set - keyframes
+     for the keyframe encoder, a uniform clip sample otherwise) plus one frame
+     extracted from the candidate segment, asked for a 0-10 score.
    Missing components (weights absent, Ollama down, no query text) are **skipped and
    the remaining weights renormalized**; with no signal at all the coarse order is
    kept. Each result carries `segment_id`, `clip_id`, `quality_flag`, `score_rule`,

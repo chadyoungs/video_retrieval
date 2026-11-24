@@ -48,3 +48,19 @@ class VideoEncoderBase(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support image-query encoding"
         )
+
+    def select_query_frames(self, frames: List["Image.Image"]) -> List["Image.Image"]:
+        """Frames representing a video query for the VLM reranker.
+
+        Must mirror what ``encode`` consumes so the visual rerank signal and
+        the embedding describe the same content. Default: uniform sample.
+        """
+        from config.settings import settings
+
+        if not frames:
+            return []
+        count = max(1, settings.n_vlm_frames)
+        if len(frames) <= count:
+            return list(frames)
+        step = (len(frames) - 1) / (count - 1)
+        return [frames[round(i * step)] for i in range(count)]

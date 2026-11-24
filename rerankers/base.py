@@ -64,6 +64,7 @@ class BaseReranker(abc.ABC):
         annotation_conditions: Optional[Dict[str, Any]] = None,
         metadata_filters: Optional[Dict[str, Any]] = None,
         query_image_path: Optional[str] = None,
+        query_image_paths: Optional[List[str]] = None,
     ) -> List[RerankedItem]:
         """Re-score and re-order candidates.
 
@@ -72,7 +73,10 @@ class BaseReranker(abc.ABC):
             candidates: coarse retrieval candidates.
             annotation_conditions: annotation rule conditions, OR semantics.
             metadata_filters: metadata conditions, AND semantics, hard gate.
-            query_image_path: image query (or video middle frame) for VLM.
+            query_image_path: single image query for the VLM.
+            query_image_paths: video-query frames for the VLM, in temporal
+                order, matching the encoder's representation (keyframes or
+                a uniform clip sample).
         """
 
     @staticmethod

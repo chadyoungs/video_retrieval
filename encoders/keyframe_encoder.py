@@ -117,6 +117,10 @@ class KeyframeEncoder(VideoEncoderBase):
         )
         return self._l2_normalize(np.mean(frame_stack, axis=0))
 
+    def select_query_frames(self, frames: List[Image.Image]) -> List[Image.Image]:
+        # Exactly the frames encode() embeds: same selector, same max_k.
+        return select_keyframes(frames, max_k=self.max_keyframes)
+
     def encode_image(self, image_path: Union[str, Path]) -> np.ndarray:
         with Image.open(image_path) as image:
             return self._encode_single_image(image)
