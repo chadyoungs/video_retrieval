@@ -86,9 +86,22 @@ python -m ingestion.main --dataset nuscenes
 `--dataset` selects the dataset adapter, the PostgreSQL table **and** the Milvus
 collection, so a run can never mix the two datasets.
 
-Per video the pipeline slices overlapping windows (`CLIP_DURATION_SEC`,
-`CLIP_OVERLAP_SEC`), samples `FRAME_SAMPLING_RATE` fps, annotates the keyframes with
-the VLM, embeds them with the keyframe encoder, and writes one row per segment:
+Segmentation and decoding follow the dataset's traits, declared by its adapter
+(`datasets/base.py`) so ingestion and query encoding stay consistent:
+
+| trait | ActivityNet | nuScenes |
+| --- | --- | --- |
+| source | continuous video | builder-cut clips of 2 Hz keyframes (2 images = 1 s) |
+| `presegmented` | `False`: sliding window (`CLIP_DURATION_SEC`, `CLIP_OVERLAP_SEC`) | `True`: one file = one segment, no re-windowing |
+| `frame_sampling_rate` | `FRAME_SAMPLING_RATE` (resampled) | `BUILDER_OUTPUT_FPS` (native 2 Hz, every frame kept) |
+
+For a short nuScenes clip the keyframe selector keeps all frames (count <=
+`KEYFRAME_COUNT`), so its embedding is effectively the mean over the whole clip.
+The mapping's `segment_start/end` are scene-relative timestamps kept as metadata;
+stored segment bounds are file-local so the viewer can extract frames.
+
+Per segment the pipeline annotates the frames with the VLM, embeds them with the
+keyframe encoder, and writes one row per segment:
 
 - **PostgreSQL**: `segment_id`, clip/timing, `dataset_version/split`, annotation
   fields, `annotation_model`, `processing_ts`.
@@ -108,13 +121,14 @@ python -m datasets.builders.nuscenes_video_builder \
     --dataroot <NUSCENES_DATA_ROOT> \
     --meta-root <NUSCENES_META_JSON_ROOT> \
     --output-dir <OUTPUT_VIDEO_DIR> \
-    --dataset-version v1.0-mini --dataset-split train --fps 12
+    --dataset-version v1.0-mini --dataset-split train --fps 2
 ```
 
 Writes CAM_FRONT MP4 clips plus `NUSCENES_CLIP_MAPPING_FILE` (clip-to-source traceability:
-scene/log/location/map tokens, sample range, ego speed, frame count). Note the clips are
-already ~`CLIP_DURATION_SEC` long and the pipeline slices them again - keep the builder
-duration >= the ingestion window, or set `CLIP_OVERLAP_SEC=0` for pre-cut clips.
+scene/log/location/map tokens, sample range, ego speed, frame count). The clips are
+final segments: ingestion takes each file whole (`presegmented`), so builder duration
+and `CLIP_DURATION_SEC` / `CLIP_OVERLAP_SEC` are independent. Keep `--fps` at the
+native keyframe rate (2) unless you deliberately interpolate.
 
 ## Retrieval
 

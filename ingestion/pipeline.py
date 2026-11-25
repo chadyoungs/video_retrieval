@@ -23,7 +23,7 @@ from datasets.factory import get_dataset_adapter
 from db.store_factory import get_relational_store, get_vector_store
 from encoders.factory import get_default_encoder
 from encoders.video_loader import read_video_frames_raw
-from ingestion.segmenter import segment_bounds
+from ingestion.segmenter import segment_bounds, whole_video_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,12 @@ class IngestionPipeline:
 
         self.dataset_name = dataset_name
         self.limit = limit
+
+        # Dataset traits (segmentation mode, decode fps) come from the adapter:
+        # ActivityNet = continuous video -> sliding window + resampling;
+        # nuScenes = pre-cut 2 Hz keyframe clips -> whole file, every frame.
+        self.adapter = get_dataset_adapter(dataset_name)
+        self.sample_rate = float(self.adapter.frame_sampling_rate)
 
         self.rel_store = get_relational_store(dataset_name=dataset_name)
         self.vec_store = get_vector_store(dataset_name=dataset_name)
@@ -109,9 +115,14 @@ class IngestionPipeline:
     # ------------------------------------------------------------------ #
     def _process_single_video(self, video_file: str, raw_meta: Dict[str, Any]) -> None:
         try:
-            starts, ends = segment_bounds(
-                video_file, settings.clip_duration_sec, settings.clip_overlap_sec
-            )
+            if self.adapter.presegmented:
+                # One file = one final segment; the mapping's segment_start/end
+                # are scene-relative timestamps, not offsets inside this file.
+                starts, ends = whole_video_bounds(video_file)
+            else:
+                starts, ends = segment_bounds(
+                    video_file, settings.clip_duration_sec, settings.clip_overlap_sec
+                )
             if not starts:
                 logger.warning("No segments generated for %s", video_file)
                 return
@@ -126,7 +137,7 @@ class IngestionPipeline:
                     video_path=video_file,
                     start=start,
                     end=end,
-                    sample_rate=settings.frame_sampling_rate,
+                    sample_rate=self.sample_rate,
                 )
                 if not frames:
                     logger.warning("Segment [%.2f, %.2f] has no frames; skipped", start, end)
@@ -137,7 +148,7 @@ class IngestionPipeline:
                     video_path=video_file,
                     start=start,
                     end=end,
-                    sample_rate=settings.frame_sampling_rate,
+                    sample_rate=self.sample_rate,
                     preloaded_frames=frames,
                 )
                 embedding = self.encoder.encode(
@@ -200,10 +211,13 @@ class IngestionPipeline:
                     "segment_end": float(end),
                     "dataset_name": self.dataset_name,
                     "clip_id": clip_id,
-                    "camera_channel": raw_meta.get("camera_channel", "unknown"),
                     "embedding_model": settings.embedding_model_version,
                     "clip_vector": [float(x) for x in embedding],
                 }
+                # camera_channel is a nuScenes-only field (CAM_FRONT etc.);
+                # ActivityNet has no camera notion, so do not fabricate one.
+                if raw_meta.get("camera_channel") is not None:
+                    milvus_row["camera_channel"] = raw_meta["camera_channel"]
 
                 self._push_row(sql_row, milvus_row)
                 self.stats["inserted_segments"] += 1
@@ -218,10 +232,9 @@ class IngestionPipeline:
     # Run
     # ------------------------------------------------------------------ #
     def _load_entries(self) -> List[Dict[str, Any]]:
-        adapter = get_dataset_adapter(self.dataset_name)
         entries = [
             {"video_file": entry.video_file_path, "metadata": entry.metadata}
-            for entry in adapter.discover()
+            for entry in self.adapter.discover()
         ]
         if self.limit is not None:
             entries = entries[: self.limit]

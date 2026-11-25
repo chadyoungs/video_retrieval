@@ -30,6 +30,7 @@ import numpy as np
 
 from config.settings import settings
 from db.relational_base import RelationalStoreBase
+from datasets.factory import get_dataset_adapter
 from db.store_factory import get_relational_store, get_vector_store
 from db.vector_base import VectorStoreBase
 from encoders.base import VideoEncoderBase
@@ -73,6 +74,12 @@ class RetrievalService:
         self.dataset_key = dataset_key or settings.dataset_source
         if self.dataset_key not in ("activitynet", "nuscenes"):
             raise ValueError(f"Unknown dataset_key: {self.dataset_key!r}")
+
+        # Query videos are decoded with the same dataset traits as ingestion
+        # (nuScenes: native 2 Hz keyframes; ActivityNet: resampled continuous video).
+        self.query_sample_rate = float(
+            get_dataset_adapter(self.dataset_key).frame_sampling_rate
+        )
 
         self.relational_store = relational_store or get_relational_store(self.dataset_key)
         self.vector_store = vector_store or get_vector_store(self.dataset_key)
@@ -457,7 +464,7 @@ class RetrievalService:
         from encoders.video_loader import read_video_frames_raw
 
         frames = read_video_frames_raw(
-            video_path, start, end, settings.frame_sampling_rate
+            video_path, start, end, self.query_sample_rate
         )
         if not frames:
             return None, None

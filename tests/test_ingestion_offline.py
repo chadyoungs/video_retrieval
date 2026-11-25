@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import ingestion.pipeline as pipeline_module
 from config.settings import settings
 from annotators.rules import ANNOTATION_RULES_ACTIVITYNET
+from datasets.base import DatasetAdapterBase, VideoEntry
 from db.models import ActivityNetSegmentRow
 from tests.fakes import InMemoryRelationalStore, InMemoryVectorStore
 
@@ -55,13 +56,11 @@ class FakeEncoder:
         return np.arange(self.dim, dtype="float32") / 100.0
 
 
-class FakeAdapter:
+class FakeAdapter(DatasetAdapterBase):
     def __init__(self, video_file: str) -> None:
         self.video_file = video_file
 
     def discover(self):
-        from datasets.base import VideoEntry
-
         return [
             VideoEntry(
                 video_file_name=Path(self.video_file).name,
@@ -70,7 +69,6 @@ class FakeAdapter:
                     "dataset_name": "activitynet",
                     "dataset_version": "unknown",
                     "dataset_split": "unknown",
-                    "camera_channel": "unknown",
                     "extra_field_not_in_table": "should be dropped",
                 },
             )
@@ -164,11 +162,81 @@ def test_pipeline_rows_and_segments() -> None:
     assert first_vec["segment_id"] == first_sql["segment_id"], "SQL / Milvus keys diverged"
     assert first_vec["embedding_model"] == settings.embedding_model_version
     assert len(first_vec["clip_vector"]) == FakeEncoder.dim
-    assert "camera_channel" in first_vec, "Milvus row lost camera_channel"
+    assert "camera_channel" not in first_vec, "ActivityNet has no camera_channel"
 
     segment_ids = {row["segment_id"] for row in rel.rows}
     assert len(segment_ids) == len(rel.rows), "duplicate segment_id in one run"
     print(f"ok  pipeline wrote {len(rel.rows)} segments with matching keys")
+
+
+def test_presegmented_low_hz_clips() -> None:
+    """nuScenes-style clips: one file = one segment, every 2 Hz frame kept."""
+    try:
+        import cv2  # noqa: F401
+    except ImportError:
+        print("skip presegmented check (opencv not installed)")
+        return
+
+    from datasets.nuscenes import NuScenesAdapter
+
+    assert NuScenesAdapter.presegmented is True
+    assert NuScenesAdapter().frame_sampling_rate == settings.builder_output_fps
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    video = tmp_dir / "scene_clip.mp4"
+    # 12 s at 2 fps = 24 frames: longer than CLIP_DURATION_SEC, so the
+    # ActivityNet sliding window would cut it into overlapping pieces.
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi",
+         "-i", "testsrc=size=160x120:rate=2", "-t", "12",
+         "-pix_fmt", "yuv420p", str(video)],
+        check=True,
+    )
+
+    seen = {}
+
+    class CapturingAnnotator(FakeAnnotator):
+        def annotate(self, video_path, start, end, sample_rate, preloaded_frames=None):
+            seen.setdefault("calls", []).append(
+                (start, end, sample_rate, len(preloaded_frames or []))
+            )
+            return super().annotate(
+                video_path, start, end, sample_rate, preloaded_frames
+            )
+
+    class PresegmentedAdapter(FakeAdapter):
+        presegmented = True
+
+        @property
+        def frame_sampling_rate(self) -> float:
+            return 2.0
+
+        def discover(self):
+            entries = super().discover()
+            for entry in entries:
+                entry.metadata["camera_channel"] = "CAM_FRONT"
+            return entries
+
+    rel = InMemoryRelationalStore(
+        rows=[], annotation_fields=tuple(ANNOTATION), columns=ACTIVITYNET_COLUMNS
+    )
+    vec = InMemoryVectorStore(hits=[])
+    _install_fakes(str(video), rel, vec)
+    pipeline_module.get_annotator = lambda dataset_name: CapturingAnnotator()
+    pipeline_module.get_dataset_adapter = lambda dataset_name: PresegmentedAdapter(str(video))
+
+    pipeline = pipeline_module.IngestionPipeline(dataset_name="activitynet")
+    pipeline.run()
+
+    assert len(rel.rows) == 1, f"presegmented clip was re-windowed: {len(rel.rows)} rows"
+    row = rel.rows[0]
+    assert row["segment_start"] == 0.0 and abs(row["segment_end"] - 12.0) < 0.01, row
+    assert len(seen["calls"]) == 1, seen
+    start, end, rate, frame_count = seen["calls"][0]
+    assert rate == 2.0, f"native 2 Hz rate not used: {rate}"
+    assert frame_count == 24, f"expected all 24 keyframes, got {frame_count}"
+    assert vec.inserted[0].get("camera_channel") == "CAM_FRONT", "camera_channel lost"
+    print("ok  presegmented 2 Hz clip: one whole-file segment, all frames kept")
 
 
 def test_pipeline_limit() -> None:
@@ -299,6 +367,7 @@ def test_metadata_quality_flag_is_overridden() -> None:
 def main() -> None:
     tests = [
         test_pipeline_rows_and_segments,
+        test_presegmented_low_hz_clips,
         test_pipeline_limit,
         test_quality_flag_is_persisted,
         test_metadata_quality_flag_is_overridden,

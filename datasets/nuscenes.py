@@ -19,7 +19,21 @@ logger = logging.getLogger(__name__)
 
 
 class NuScenesAdapter(DatasetAdapterBase):
-    """Discover NuScenes segments listed in the clip mapping JSON."""
+    """Discover NuScenes segments listed in the clip mapping JSON.
+
+    Unlike ActivityNet's continuous video, nuScenes ships 2 Hz keyframes
+    (two images cover one second) and the builder already cuts each scene
+    window into its own mp4: one file = one segment. Re-windowing with the
+    ActivityNet sliding window or resampling at 10 fps would be wrong, so
+    this adapter declares ``presegmented`` and the native keyframe rate.
+    """
+
+    presegmented = True
+
+    @property
+    def frame_sampling_rate(self) -> float:
+        # Native keyframe rate: every frame of the clip is kept.
+        return float(settings.builder_output_fps)
 
     def discover(self) -> List[VideoEntry]:
         mapping_path = Path(settings.nuscenes_clip_mapping_file)
@@ -72,6 +86,9 @@ class NuScenesAdapter(DatasetAdapterBase):
                 "quality_flag": item.get("quality_flag", "ok"),
             }
 
+            # segment_start/end in the mapping are scene-relative timestamps,
+            # NOT offsets inside the clip file (the file starts at frame 0).
+            # They stay informational; ingestion decodes the whole clip file.
             entries.append(
                 VideoEntry(
                     video_file_name=clip_path.name,
