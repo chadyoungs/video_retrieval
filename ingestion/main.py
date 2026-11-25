@@ -22,6 +22,7 @@ def main() -> None:
         choices=["activitynet", "nuscenes"],
         help="Dataset key (also selects the PG table and Milvus collection)",
     )
+    # We can run a small dataset for quick validation.
     parser.add_argument("--limit", type=int, default=None, help="Only ingest the first N videos")
     parser.add_argument("--drop-sql", action="store_true", help="Drop the PG table first")
     parser.add_argument("--drop-milvus", action="store_true", help="Drop the Milvus collection first")

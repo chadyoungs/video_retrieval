@@ -1,8 +1,7 @@
 """ActivityNet adapter: glob raw videos under the configured data root.
 
-Digest of ``utils/dataset_adapter.py::_build_activitynet_entries``. ActivityNet
-entries are whole videos; segment bounds are left unset and resolved by the
-ingestion step.
+ActivityNet entries are whole videos; segment bounds are left unset and 
+resolved by the ingestion step.
 """
 
 from __future__ import annotations
@@ -36,9 +35,9 @@ class ActivityNetAdapter(DatasetAdapterBase):
                     video_file_name=path.name,
                     video_file_path=str(path),
                     metadata={
-                        "dataset_name": "activitynet",
-                        "dataset_version": "unknown",
-                        "dataset_split": "unknown",
+                        "dataset_name": settings.dataset_source,
+                        "dataset_version": settings.activitynet_dataset_version,
+                        "dataset_split": settings.activitynet_dataset_split,
                     },
                 )
             )

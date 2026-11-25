@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     }
     # legacy single collection
     collection_name: str = "video_reverse_search_demo_index"
-    milvus_metric_type: str = "COSINE"
+    milvus_metric_type: str = "COSINE" # good choice for CLIP / SigLIP embeddings, see https://milvus.io/docs/v2.3.0/metric.md
 
     # ======== PostgreSQL =========
     pg_dsn: str = "postgresql://devuser:pass123@127.0.0.1:5432/postgres"
@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     hf_endpoint: str = "https://hf-mirror.com"
     # True: only load weights already present under model_cache_dir, never
     # touch the network. False: download into model_cache_dir on first use.
-    hf_local_only: bool = False
+    hf_local_only: bool = True
 
     # ========= Frame / Embedding Policy =========
     encoder_type: Literal["whole_clip", "keyframes"] = "keyframes"
@@ -93,12 +93,13 @@ class Settings(BaseSettings):
     # ========= ActivityNet Dataset paths =========
     activitynet_data_root: str = "/mnt/sdc/activitynet_caption/demo_data"
     activitynet_file_format: str = "mp4"
+    activitynet_dataset_version: str = "demo"
+    activitynet_dataset_split: str = "demo"
 
     # ========= NuScenes Dataset paths =========
     nuscenes_raw_dataroot: str = "/mnt/sdb/datasets/nuscenes-data/nuscenes"
     nuscenes_video_root: str = "/mnt/sdb/datasets/nuscenes-data/nuscenes/samples/CAM_FRONT"
     nuscenes_clip_mapping_file: str = "./datasets/builders/clip_mapping.json"
-    nuscenes_dataset_name: str = "nuscenes"
     nuscenes_dataset_version: str = "v1.0-mini"
     nuscenes_dataset_split: str = "train"
     nuscenes_camera_channel: str = "CAM_FRONT"

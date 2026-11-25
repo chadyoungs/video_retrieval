@@ -37,6 +37,8 @@ def _image_to_base64(image: Image.Image) -> str:
 class BaseAnnotator(abc.ABC):
     """Abstract annotator interface shared by dataset implementations.
     Annotate one continuous video segment (multiple input frames) and return ONE unified annotation dict for this clip.
+    Note: this module does not evaluate annotation quality, even though the dedicated quality module is placed in the 
+    same subfolder.
     """
 
     rules: Dict[str, List[str]] = {}

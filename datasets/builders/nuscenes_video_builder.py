@@ -289,7 +289,7 @@ class NuScenesVideoBuilder:
             ego = self._ego_motion(window)
             records.append(
                 {
-                    "dataset_name": settings.nuscenes_dataset_name,
+                    "dataset_name": settings.dataset_source,
                     "dataset_version": self.dataset_version,
                     "dataset_split": self.dataset_split,
                     "camera_channel": self.camera_channel,

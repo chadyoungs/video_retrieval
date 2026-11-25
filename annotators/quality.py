@@ -167,7 +167,8 @@ def _phrase_problems(text: str, strict_unknown: bool) -> Tuple[str, ...]:
         for token in tokens
         if token not in _STOPWORD_TOKENS and token not in _UNCERTAIN_TOKENS
     ]
-    if len(content) < 2:
+    # 4, empirical setting in this repo
+    if len(content) < 4:
         return ("summary_too_short",)
     return ()
 

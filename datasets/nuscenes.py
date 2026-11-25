@@ -1,9 +1,8 @@
 """NuScenes adapter: read the builder clip mapping and resolve segment videos.
 
-Digest of ``utils/dataset_adapter.py::_build_nuscenes_entries``. The builder
-mapping records segment timing, scene linkage and ego motion; this adapter
-resolves file paths, skips missing clips and renames builder fields to the
-store metadata field names.
+The builder mapping records segment timing, scene linkage and ego motion; this 
+adapter resolves file paths, skips missing clips and renames builder fields to 
+the store metadata field names.
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ class NuScenesAdapter(DatasetAdapterBase):
 
             metadata: Dict[str, Any] = {
                 "dataset_name": item.get(
-                    "dataset_name", settings.nuscenes_dataset_name
+                    "dataset_name", settings.dataset_source
                 ),
                 "dataset_version": item.get(
                     "dataset_version", settings.nuscenes_dataset_version
